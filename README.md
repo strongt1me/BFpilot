@@ -5,8 +5,7 @@ single web UI on port `5905`, installs a small PS5 home-screen browser launcher
 tile, and lets the console perform large file operations locally instead of
 pushing everything through a slow remote copy path.
 
-The project is intentionally scoped to file management only. It does not bundle
-patch payloads, game mounting logic, extra network daemons, forced cleanup tools,
+The project is intentionally scoped to file management only. It does not bundle extra network daemons, forced cleanup tools,
 or companion service managers.
 
 ## Runtime

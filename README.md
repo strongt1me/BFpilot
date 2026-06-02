@@ -50,11 +50,11 @@ The payload stores launcher marker data in:
 The PS5 launcher app itself is installed under:
 
 ```text
-/user/app/BFPILOT01
+/user/app/BFPL00001
 ```
 
 The installer removes older launcher title IDs from previous names before
-registering `BFPILOT01`, so stale tiles from earlier builds do not get in the
+registering `BFPL00001`, so stale tiles from earlier builds do not get in the
 way.
 
 ## Project Layout

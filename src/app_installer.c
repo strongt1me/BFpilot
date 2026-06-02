@@ -3,26 +3,29 @@
  */
 
 #include <errno.h>
+#include <dirent.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <ps5/kernel.h>
 
 #include "app_installer.h"
 #include "notify.h"
 
-#define BFPILOT_APP_TITLE_ID "BFPILOT01"
+#define BFPILOT_APP_TITLE_ID "BFPL00001"
+#define BFPILOT_INVALID_APP_TITLE_ID "BFPILOT01"
 #define BFPILOT_LEGACY_APP_TITLE_ID "BSFM00001"
 #define BFPILOT_OLD_LEGACY_APP_TITLE_ID "BS5F00001"
 #define BFPILOT_APP_ROOT "/user/app"
 #define BFPILOT_APP_PARENT BFPILOT_APP_ROOT "/"
 #define BFPILOT_DATA_DIR "/data/BFpilot"
 #define BFPILOT_MARKER_PATH BFPILOT_DATA_DIR "/launcher.ok"
-#define BFPILOT_INSTALL_MARKER "bfpilot-launcher-v1\n"
+#define BFPILOT_INSTALL_MARKER "bfpilot-launcher-v2\n"
 
 #define INCASSET(name, file)                                                   \
   __asm__(".section .rodata\n"                                                 \
@@ -117,6 +120,39 @@ mkdir_if_needed(const char *path) {
 
 
 static int
+remove_tree(const char *path) {
+  struct stat st;
+  if(lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
+
+  if(S_ISDIR(st.st_mode)) {
+    DIR *dir = opendir(path);
+    if(!dir) return -1;
+
+    struct dirent *ent;
+    while((ent = readdir(dir))) {
+      if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+
+      char child[512];
+      int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+      if(n < 0 || (size_t)n >= sizeof(child)) {
+        closedir(dir);
+        errno = ENAMETOOLONG;
+        return -1;
+      }
+      if(remove_tree(child) != 0) {
+        closedir(dir);
+        return -1;
+      }
+    }
+    closedir(dir);
+    return rmdir(path);
+  }
+
+  return unlink(path);
+}
+
+
+static int
 ensure_data_dir(void) {
   if(mkdir_if_needed("/data") != 0) return -1;
   return mkdir_if_needed(BFPILOT_DATA_DIR);
@@ -165,11 +201,22 @@ bfpilot_install_app_if_needed(void) {
 
   int uninstall_err = sceAppInstUtilAppUnInstall(BFPILOT_APP_TITLE_ID);
   printf("  launcher install: refresh BFpilot tile 0x%08x\n", uninstall_err);
+  uninstall_err = sceAppInstUtilAppUnInstall(BFPILOT_INVALID_APP_TITLE_ID);
+  printf("  launcher install: remove invalid BFpilot tile 0x%08x\n",
+         uninstall_err);
   uninstall_err = sceAppInstUtilAppUnInstall(BFPILOT_LEGACY_APP_TITLE_ID);
   printf("  launcher install: remove BS5FileManager tile 0x%08x\n",
          uninstall_err);
   uninstall_err = sceAppInstUtilAppUnInstall(BFPILOT_OLD_LEGACY_APP_TITLE_ID);
   printf("  launcher install: remove old legacy tile 0x%08x\n", uninstall_err);
+
+  char invalid_dir[256];
+  snprintf(invalid_dir, sizeof(invalid_dir), BFPILOT_APP_ROOT "/%s",
+           BFPILOT_INVALID_APP_TITLE_ID);
+  if(remove_tree(invalid_dir) != 0) {
+    printf("  launcher install: warning, failed removing %s errno %d\n",
+           invalid_dir, errno);
+  }
 
   if(mkdir_if_needed(app_dir) != 0 || mkdir_if_needed(sce_sys_dir) != 0) {
     printf("  launcher install: mkdir failed errno %d\n", errno);
@@ -193,7 +240,7 @@ bfpilot_install_app_if_needed(void) {
   err = install_app(BFPILOT_APP_TITLE_ID, BFPILOT_APP_PARENT);
   if(err) {
     printf("  launcher install: install_app failed 0x%08x\n", err);
-    snprintf(msg, sizeof(msg), "register BFPILOT01 failed 0x%08x", err);
+    snprintf(msg, sizeof(msg), "register BFPL00001 failed 0x%08x", err);
     bfpilot_notify("BFpilot app failed", msg);
     return -1;
   }
@@ -208,6 +255,6 @@ bfpilot_install_app_if_needed(void) {
   }
 
   bfpilot_notify("BFpilot app ready",
-                 "Tile BFPILOT01 opens http://127.0.0.1:5905/");
+                 "Tile BFPL00001 opens http://127.0.0.1:5905/");
   return 1;
 }

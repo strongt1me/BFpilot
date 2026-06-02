@@ -167,6 +167,21 @@ join_path(char *out, size_t out_sz, const char *dir, const char *name) {
 }
 
 
+static const char *
+path_basename(const char *path) {
+  const char *base = strrchr(path ? path : "", '/');
+  return base && base[1] ? base + 1 : path;
+}
+
+
+static int
+path_is_same_or_child(const char *base, const char *path) {
+  size_t n = strlen(base);
+  while(n > 1 && base[n - 1] == '/') n--;
+  return strncmp(base, path, n) == 0 && (path[n] == 0 || path[n] == '/');
+}
+
+
 struct job_state {
   pthread_mutex_t lock;
   atomic_int      busy;
@@ -448,34 +463,75 @@ static void *
 copy_worker(void *arg) {
   struct copy_arg *a = arg;
   long files = 0, bytes = 0;
-  job_set_current("Scanning source");
-  size_walker(a->src, &files, &bytes, 0);
-  atomic_store(&g_job.total_files, (int)files);
-  atomic_store(&g_job.total_bytes, bytes);
-
   struct stat src_st, dst_st;
   char final_dst[1024];
-  snprintf(final_dst, sizeof(final_dst), "%s", a->dst);
+
   if(lstat(a->src, &src_st) != 0) {
     job_end(-1, "source not found");
     free(a);
     return NULL;
   }
-  if(stat(a->dst, &dst_st) == 0 && S_ISDIR(dst_st.st_mode)) {
-    const char *base = strrchr(a->src, '/');
-    join_path(final_dst, sizeof(final_dst), a->dst, base ? base + 1 : a->src);
+
+  job_set_current("Scanning source");
+  size_walker(a->src, &files, &bytes, 0);
+  if(job_cancelled()) {
+    job_end(-1, "cancelled");
+    free(a);
+    return NULL;
+  }
+  atomic_store(&g_job.total_files, (int)files);
+  atomic_store(&g_job.total_bytes, bytes);
+
+  if(stat(a->dst, &dst_st) == 0) {
+    if(!S_ISDIR(dst_st.st_mode)) {
+      job_end(-1, "target exists and is not a folder");
+      free(a);
+      return NULL;
+    }
+  } else {
+    if(errno != ENOENT) {
+      char err[160];
+      snprintf(err, sizeof(err), "target: %s", strerror(errno));
+      job_end(-1, err);
+      free(a);
+      return NULL;
+    }
+    if(mkdirs(a->dst) != 0) {
+      char err[160];
+      snprintf(err, sizeof(err), "mkdir target: %s", strerror(errno));
+      job_end(-1, err);
+      free(a);
+      return NULL;
+    }
   }
 
-  char parent[1024];
-  snprintf(parent, sizeof(parent), "%s", final_dst);
-  char *slash = strrchr(parent, '/');
-  if(slash && slash != parent) {
-    *slash = 0;
-    mkdirs(parent);
+  const char *base = path_basename(a->src);
+  if(strlen(a->dst) + strlen(base) + 2 >= sizeof(final_dst)) {
+    job_end(-1, "target path too long");
+    free(a);
+    return NULL;
+  }
+  join_path(final_dst, sizeof(final_dst), a->dst, base);
+
+  if(!strcmp(a->src, final_dst)) {
+    job_end(-1, "source and destination are the same");
+    free(a);
+    return NULL;
+  }
+  if(S_ISDIR(src_st.st_mode) &&
+     path_is_same_or_child(a->src, final_dst)) {
+    job_end(-1, "refusing to place a folder inside itself");
+    free(a);
+    return NULL;
   }
 
   if(a->is_move) {
     job_set_current(a->src);
+    if(job_cancelled()) {
+      job_end(-1, "cancelled");
+      free(a);
+      return NULL;
+    }
     if(rename(a->src, final_dst) == 0) {
       atomic_store(&g_job.done_files, (int)(files > 0 ? files : 1));
       atomic_store(&g_job.copied_bytes, bytes);
@@ -495,14 +551,21 @@ copy_worker(void *arg) {
   int rc = copy_recursive(a->src, final_dst);
   if(rc != 0) {
     char err[160];
-    snprintf(err, sizeof(err), "copy: %s", strerror(errno));
+    snprintf(err, sizeof(err), "copy: %s",
+             job_cancelled() ? "cancelled" : strerror(errno));
     job_end(-1, err);
+    free(a);
+    return NULL;
+  }
+  if(job_cancelled()) {
+    job_end(-1, "cancelled");
     free(a);
     return NULL;
   }
   if(a->is_move && delete_recursive(a->src, 0) != 0) {
     char err[160];
-    snprintf(err, sizeof(err), "post-move cleanup: %s", strerror(errno));
+    snprintf(err, sizeof(err), "post-move cleanup: %s",
+             job_cancelled() ? "cancelled" : strerror(errno));
     job_end(-1, err);
     free(a);
     return NULL;
@@ -525,12 +588,18 @@ delete_worker(void *arg) {
   long items = 0, bytes = 0;
   job_set_current("Scanning folder");
   size_walker(a->path, &items, &bytes, 1);
+  if(job_cancelled()) {
+    job_end(-1, "cancelled");
+    free(a);
+    return NULL;
+  }
   atomic_store(&g_job.total_files, (int)(items > 0 ? items : 1));
   atomic_store(&g_job.total_bytes, bytes);
 
   if(delete_recursive(a->path, 1) != 0) {
     char err[160];
-    snprintf(err, sizeof(err), "delete: %s", strerror(errno));
+    snprintf(err, sizeof(err), "delete: %s",
+             job_cancelled() ? "cancelled" : strerror(errno));
     job_end(-1, err);
     free(a);
     return NULL;
@@ -926,7 +995,9 @@ status_handler(const http_request_t *req) {
 
 static int
 cancel_handler(const http_request_t *req) {
-  atomic_store(&g_job.cancel, 1);
+  if(atomic_load(&g_job.busy)) {
+    atomic_store(&g_job.cancel, 1);
+  }
   return status_handler(req);
 }
 

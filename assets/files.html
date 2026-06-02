@@ -7,20 +7,22 @@
   <title>BS5FileManager</title>
   <style>
     :root {
-      --paper: #f7f8f5;
-      --ink: #1f2421;
-      --soft: #eef1ec;
-      --line: #c9d0c8;
-      --muted: #657069;
-      --deep: #19382d;
-      --deep-2: #285944;
-      --mint: #d5f1df;
-      --sky: #d9ecff;
-      --gold: #ffe6a7;
-      --rose: #ffe0df;
-      --red: #b53632;
-      --shadow: rgba(28, 39, 34, 0.12);
-      --focus: rgba(40, 89, 68, 0.24);
+      --paper: #090d12;
+      --panel: #111821;
+      --panel-2: #151f2a;
+      --ink: #edf4f2;
+      --soft: #182330;
+      --line: #293645;
+      --muted: #9aa8b6;
+      --deep: #34d399;
+      --deep-2: #5ee0aa;
+      --mint: #123326;
+      --sky: #17314a;
+      --gold: #3d3218;
+      --rose: #3b1d23;
+      --red: #ff8585;
+      --shadow: rgba(0, 0, 0, 0.45);
+      --focus: rgba(94, 224, 170, 0.24);
     }
 
     * {
@@ -51,7 +53,7 @@
       min-height: 34px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #fff;
+      background: var(--panel-2);
       color: var(--ink);
       padding: 0 11px;
       cursor: pointer;
@@ -74,23 +76,24 @@
     button.primary {
       border-color: var(--deep-2);
       background: var(--deep);
-      color: #fff;
+      color: #06130e;
+      font-weight: 700;
     }
 
     button.danger {
-      border-color: #e2a3a0;
+      border-color: #71333a;
       background: var(--rose);
       color: var(--red);
     }
 
     button.warn {
-      border-color: #debf62;
+      border-color: #8a6f2d;
       background: var(--gold);
     }
 
     .top {
       border-bottom: 1px solid var(--line);
-      background: #fff;
+      background: var(--panel);
     }
 
     .top-inner {
@@ -146,11 +149,11 @@
       width: 8px;
       height: 8px;
       border-radius: 999px;
-      background: #b0b8b1;
+      background: #566575;
     }
 
     .status.ready .dot {
-      background: #2f9d5b;
+      background: var(--deep);
     }
 
     .shell {
@@ -169,7 +172,7 @@
     .job {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fff;
+      background: var(--panel);
       box-shadow: 0 8px 22px var(--shadow);
       min-width: 0;
     }
@@ -216,7 +219,7 @@
       height: 34px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #fff;
+      background: #0c1219;
       color: var(--ink);
       padding: 0 10px;
       font-family: Consolas, Menlo, monospace;
@@ -254,7 +257,7 @@
       z-index: 1;
       min-height: 34px;
       padding: 0 12px;
-      background: #fbfcfa;
+      background: var(--panel-2);
       border-bottom: 1px solid var(--line);
       color: var(--muted);
       font-size: 12px;
@@ -269,13 +272,13 @@
     .file-row {
       min-height: 42px;
       padding: 0 12px;
-      border-bottom: 1px solid #edf0eb;
+      border-bottom: 1px solid #202a36;
       cursor: default;
       user-select: none;
     }
 
     .file-row:hover {
-      background: #f1f5f0;
+      background: #172231;
     }
 
     .file-row.selected {
@@ -300,7 +303,7 @@
     }
 
     .file-row.dir .tag {
-      border-color: #b8d5c2;
+      border-color: #27724e;
       background: var(--mint);
       color: var(--deep);
     }
@@ -334,6 +337,8 @@
       height: 36px;
       border: 1px solid var(--line);
       border-radius: 6px;
+      background: #0c1219;
+      color: var(--ink);
       padding: 0 10px;
       font-family: Consolas, Menlo, monospace;
     }
@@ -353,7 +358,7 @@
       min-height: 146px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fbfcfa;
+      background: #0c1219;
       padding: 10px;
       color: var(--muted);
       font-size: 12px;
@@ -398,7 +403,7 @@
     .detail-note {
       margin-top: 7px;
       padding-top: 7px;
-      border-top: 1px solid #e4e9e2;
+      border-top: 1px solid #25313e;
       color: var(--muted);
     }
 
@@ -431,15 +436,13 @@
     .meter-fill {
       width: 0;
       height: 100%;
-      background: linear-gradient(90deg, var(--deep-2), #5ca06f);
+      background: linear-gradient(90deg, var(--deep), #85f2bf);
     }
 
     .job-text {
       grid-column: 1 / -1;
       color: var(--muted);
       font-size: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
       overflow-wrap: anywhere;
       white-space: normal;
     }
@@ -453,7 +456,7 @@
       display: none;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fff;
+      background: var(--panel);
       box-shadow: 0 12px 28px var(--shadow);
       padding: 10px 12px;
     }
@@ -463,12 +466,12 @@
     }
 
     .toast.err {
-      border-color: #e3a19d;
+      border-color: #71333a;
       background: var(--rose);
     }
 
     .toast.ok {
-      border-color: #b8d5c2;
+      border-color: #27724e;
       background: var(--mint);
     }
 
@@ -647,6 +650,8 @@
       selected: new Set(),
       detailToken: 0,
       uploadBusy: false,
+      uploadAbort: false,
+      uploadXhr: null,
       jobTimer: 0
     };
 
@@ -781,6 +786,51 @@
       if (job.current && total > 0) parts.push(job.current);
       if (!parts.length) return job.error || 'Done';
       return parts.join(' | ');
+    }
+
+    function setJobBox(verb, text, pct) {
+      if (state.jobTimer) {
+        clearInterval(state.jobTimer);
+        state.jobTimer = 0;
+      }
+      el('job').classList.add('show');
+      el('job-verb').textContent = verb || 'Working';
+      el('job-text').textContent = text || '';
+      el('job-fill').style.width = Math.max(0, Math.min(100, pct || 0)).toFixed(1) + '%';
+    }
+
+    function uploadProgressText(doneBytes, totalBytes, startedAt, index, count, name, failed, cancelling) {
+      const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
+      const speed = elapsed > 0 && doneBytes > 0 ? doneBytes / elapsed : 0;
+      const pct = totalBytes > 0 ? Math.max(0, Math.min(100, (doneBytes / totalBytes) * 100)) : 0;
+      const parts = [];
+
+      if (totalBytes > 0) {
+        parts.push(shortSize(doneBytes) + ' / ' + shortSize(totalBytes));
+        parts.push(pct.toFixed(1) + '%');
+      } else {
+        parts.push('Preparing');
+      }
+
+      parts.push(Math.min(index + 1, count) + ' / ' + count + ' files');
+      if (speed > 0) {
+        parts.push(speedMBps(speed));
+        if (totalBytes > doneBytes) {
+          parts.push('ETA ' + shortDuration((totalBytes - doneBytes) / speed));
+        }
+      }
+      if (failed > 0) parts.push(failed + ' failed');
+      if (cancelling) parts.push('cancelling');
+      if (name) parts.push(name);
+
+      return parts.join(' | ');
+    }
+
+    function updateUploadJob(doneBytes, totalBytes, startedAt, index, count, name, failed, cancelling) {
+      const pct = totalBytes > 0 ? (doneBytes / totalBytes) * 100 : 0;
+      setJobBox('upload', uploadProgressText(
+        doneBytes, totalBytes, startedAt, index, count, name, failed, cancelling
+      ), pct);
     }
 
     function detailRow(label, value) {
@@ -1111,15 +1161,25 @@
       await refresh();
     }
 
-    function uploadOne(file, relPath) {
+    function uploadOne(file, relPath, onProgress) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         let url = '/api/fs/upload?path=' + encodeURIComponent(state.path) +
           '&filename=' + encodeURIComponent(file.name);
         if (relPath) url += '&relpath=' + encodeURIComponent(relPath);
 
+        function clearXhr() {
+          if (state.uploadXhr === xhr) state.uploadXhr = null;
+        }
+
+        state.uploadXhr = xhr;
         xhr.open('POST', url);
+        xhr.upload.onprogress = (event) => {
+          const loaded = Math.min(file.size, Number(event.loaded || 0));
+          if (onProgress) onProgress(loaded);
+        };
         xhr.onload = () => {
+          clearXhr();
           let body = {};
           try { body = JSON.parse(xhr.responseText || '{}'); } catch (err) {}
           if (xhr.status >= 200 && xhr.status < 300 && body.ok !== false) {
@@ -1128,7 +1188,14 @@
             reject(new Error(body.error || ('HTTP ' + xhr.status)));
           }
         };
-        xhr.onerror = () => reject(new Error('network error'));
+        xhr.onerror = () => {
+          clearXhr();
+          reject(new Error('network error'));
+        };
+        xhr.onabort = () => {
+          clearXhr();
+          reject(new Error('upload cancelled'));
+        };
         xhr.send(file);
       });
     }
@@ -1136,25 +1203,56 @@
     async function uploadFiles(files) {
       if (!files || !files.length || state.uploadBusy) return;
       state.uploadBusy = true;
+      state.uploadAbort = false;
+      state.uploadXhr = null;
       let ok = 0;
       let failed = 0;
+      let uploadedBytes = 0;
+      const totalBytes = files.reduce((sum, file) => sum + (file.size || 0), 0);
+      const startedAt = Date.now();
 
-      for (const file of files) {
+      updateUploadJob(0, totalBytes, startedAt, 0, files.length, 'Preparing', failed, false);
+
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        if (state.uploadAbort) break;
         const relPath = file.webkitRelativePath ?
           file.webkitRelativePath.split('/').slice(0, -1).join('/') : '';
         try {
-          await uploadOne(file, relPath);
+          await uploadOne(file, relPath, (loaded) => {
+            updateUploadJob(uploadedBytes + loaded, totalBytes, startedAt,
+              index, files.length, file.name, failed, state.uploadAbort);
+          });
           ok++;
+          uploadedBytes += file.size || 0;
+          updateUploadJob(uploadedBytes, totalBytes, startedAt,
+            index, files.length, file.name, failed, false);
           toast('Uploaded ' + ok + ' / ' + files.length, 'ok');
         } catch (err) {
+          if (state.uploadAbort || err.message === 'upload cancelled') {
+            state.uploadAbort = true;
+            updateUploadJob(uploadedBytes, totalBytes, startedAt,
+              index, files.length, file.name, failed, true);
+            break;
+          }
           failed++;
+          updateUploadJob(uploadedBytes, totalBytes, startedAt,
+            index, files.length, file.name, failed, false);
           toast('upload: ' + err.message, 'err');
         }
       }
 
       state.uploadBusy = false;
+      state.uploadXhr = null;
       await refresh();
-      toast(ok + ' uploaded' + (failed ? ', ' + failed + ' failed' : ''), failed ? 'err' : 'ok');
+      if (state.uploadAbort) {
+        toast('Upload cancelled after ' + ok + ' file(s)', 'err');
+      } else {
+        toast(ok + ' uploaded' + (failed ? ', ' + failed + ' failed' : ''), failed ? 'err' : 'ok');
+      }
+      setTimeout(() => {
+        if (!state.uploadBusy && !state.jobTimer) el('job').classList.remove('show');
+      }, 1600);
     }
 
     function pollJob() {
@@ -1241,6 +1339,12 @@
         });
       });
       el('job-cancel').addEventListener('click', () => {
+        if (state.uploadBusy) {
+          state.uploadAbort = true;
+          if (state.uploadXhr) state.uploadXhr.abort();
+          setJobBox('upload', 'Cancelling upload...', 0);
+          return;
+        }
         fetch('/api/fs/job/cancel').catch(() => {});
       });
 

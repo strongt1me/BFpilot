@@ -28,7 +28,6 @@ static const mime_entry_t g_mime[] = {
   {"md",   "text/markdown"},
   {"mp4",  "video/mp4"},
   {"png",  "image/png"},
-  {"pkg",  "application/octet-stream"},
   {"rap",  "application/octet-stream"},
   {"rif",  "application/octet-stream"},
   {"self", "application/octet-stream"},

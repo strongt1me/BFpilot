@@ -5,7 +5,7 @@
 #pragma once
 
 #ifndef VERSION_TAG
-#define VERSION_TAG "bs5fm-v0.1.1"
+#define VERSION_TAG "bs5fm-v0.2.0"
 #endif
 
 #ifndef BUILD_VERSION

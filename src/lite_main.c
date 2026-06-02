@@ -29,7 +29,6 @@
 #define BS5FM_RELOAD_TOKEN "bs5fm-local-reload"
 
 int sceNetCtlInit(void);
-int sceSystemServiceLaunchWebBrowser(const char *uri, void *);
 int sceUserServiceInitialize(void *);
 
 
@@ -60,8 +59,6 @@ detect_lan_ip(char *out, size_t out_size) {
 typedef struct ready_state {
   char ip[64];
   int notified;
-  int launch_browser;
-  int browser_launched;
 } ready_state_t;
 
 
@@ -221,20 +218,6 @@ handoff_existing_server(void) {
 
 
 static void
-launch_browser_once(ready_state_t *state) {
-  if(!state->launch_browser || state->browser_launched) return;
-
-  int err = sceSystemServiceLaunchWebBrowser("http://127.0.0.1:5905/", NULL);
-  if(err == 0) {
-    puts("  ps5 browser: opened http://127.0.0.1:5905/");
-  } else {
-    printf("  ps5 browser: launch failed 0x%08x\n", err);
-  }
-  state->browser_launched = 1;
-}
-
-
-static void
 on_web_ready(unsigned short port, void *arg) {
   ready_state_t *state = arg;
   char url[128];
@@ -248,7 +231,6 @@ on_web_ready(unsigned short port, void *arg) {
     bs5fm_notify("BS5FileManager started", url);
     state->notified = 1;
   }
-  launch_browser_once(state);
 }
 
 
@@ -281,10 +263,8 @@ main(int argc, char **argv) {
   int app_install_status = bs5fm_install_app_if_needed();
   if(app_install_status >= 0) {
     puts("  ps5 app: ready");
-    ready.launch_browser = 1;
   } else {
     puts("  ps5 app: install failed, continuing web server");
-    ready.launch_browser = 1;
   }
 
   int handoff_status = handoff_existing_server();

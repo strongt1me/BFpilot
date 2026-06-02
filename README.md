@@ -14,7 +14,6 @@ Current release: `v0.2.0`
 - Runs a file-manager web UI at `http://<PS5_IP>:5905/`
 - Installs or refreshes a `BFpilot` launcher tile on the PS5 home screen
 - Uses a dark-only UI
-- Uses the same folder-and-sword icon for the PS5 launcher and web UI
 - Browses, uploads, downloads, copies, moves, renames, creates folders, and deletes
 - Shows progress for copy, move, delete, and browser uploads
 - Reports size, speed, ETA, item count, and current path/file while working

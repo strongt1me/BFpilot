@@ -14,6 +14,7 @@ Current release: `v0.2.0`
 - Runs a file-manager web UI at `http://<PS5_IP>:5905/`
 - Installs or refreshes a `BS5FileManager` launcher tile on the PS5 home screen
 - Uses a dark-only UI
+- Uses the same folder-and-sword icon for the PS5 launcher and web UI
 - Browses, uploads, downloads, copies, moves, renames, creates folders, and deletes
 - Shows progress for copy, move, delete, and browser uploads
 - Reports size, speed, ETA, item count, and current path/file while working
@@ -65,6 +66,7 @@ not get in the way.
 - `src/websrv_lite.c` serves the UI, downloads under `/fs`, and JSON APIs.
 - `src/transfer.c` contains the file-manager API and long-running jobs.
 - `assets/files.html` is the full web UI that gets embedded into the ELF.
+- `assets/icon.png` is the smaller web UI icon.
 - `assets-app/` contains the launcher tile metadata and icon.
 
 Generated files go under `gen/` during build. The built ELF is not tracked in

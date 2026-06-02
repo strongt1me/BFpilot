@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="/icon.png">
   <title>BS5FileManager</title>
   <style>
     :root {
@@ -108,14 +108,11 @@
 
     .brand {
       width: 46px;
-      height: 42px;
-      display: grid;
-      place-items: center;
-      border: 2px solid var(--deep);
+      height: 46px;
+      display: block;
       border-radius: 8px;
-      color: var(--deep);
-      font-size: 13px;
-      font-weight: 800;
+      object-fit: cover;
+      box-shadow: 0 0 0 1px var(--line), 0 6px 16px rgba(52, 211, 153, 0.16);
     }
 
     .title {
@@ -564,7 +561,7 @@
 <body>
   <header class="top">
     <div class="top-inner">
-      <div class="brand">BS5</div>
+      <img class="brand" src="/icon.png" alt="">
       <div class="title">
         <strong>BS5FileManager</strong>
         <span id="build">File Manager</span>

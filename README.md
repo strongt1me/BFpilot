@@ -100,7 +100,7 @@ Deploy helper:
 make deploy PS5_HOST=<PS5_IP> PS5_PORT=9021
 ```
 
-## Safety Notes
+## Extra Notes
 
 BS5FileManager avoids kernel-level cleanup and does not force-unload other
 payloads.

@@ -108,12 +108,18 @@ Pass criteria:
 Launcher fields to record:
 
 - `launcher_enabled`.
+- `launcher_attempted`.
 - `appinst_init_rc`.
+- `title_dir_resolved`.
 - `install_title_dir_resolved`.
+- `install_title_rc`.
 - `uninstall_resolved`.
+- `uninstall_rc`.
 - `install_all_resolved`.
+- `install_all_rc`.
 - `user_app_writable`.
 - `launcher_install_rc`.
+- `launcher_final_state`.
 
 Fail data to collect:
 

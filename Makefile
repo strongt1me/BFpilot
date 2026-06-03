@@ -64,6 +64,7 @@ FULL_CFLAGS += -DBFPILOT_ENABLE_LAUNCHER=1
 FULL_CFLAGS += -DBFPILOT_BUILD_MODE=\"full\"
 
 COMMON_LDFLAGS := -Wl,--gc-sections -flto
+FULL_LDLIBS := -lSceAppInstUtil
 
 CC_CMD := "$(CC)"
 STRIP_CMD := "$(STRIP)"
@@ -84,6 +85,7 @@ WINDOWS_LINK_PREFIX += -l:crt1.o -l:crti.o -l:crtbegin.o -lc
 WINDOWS_LINK_SUFFIX := -lkernel_web -lSceLibcInternal -lSceNet
 WINDOWS_LINK_SUFFIX += -lc_stub_weak -lkernel_stub_weak
 WINDOWS_LINK_SUFFIX += -l:crtend.o -l:crtn.o
+WINDOWS_FULL_LINK_SUFFIX := -lSceAppInstUtil $(WINDOWS_LINK_SUFFIX)
 define run
 bash -lc '$(RUN_ENV) && $(1)'
 endef
@@ -119,7 +121,7 @@ $(CORE_BIN): $(CORE_OBJS)
 	$(call run,$(STRIP_CMD) --strip-all $@)
 
 $(FULL_BIN): $(FULL_OBJS) $(APP_ASSETS)
-	$(call run,$(LD_CMD) -o $@ $(WINDOWS_LINK_PREFIX) $(FULL_OBJS) $(WINDOWS_LINK_SUFFIX))
+	$(call run,$(LD_CMD) -o $@ $(WINDOWS_LINK_PREFIX) $(FULL_OBJS) $(WINDOWS_FULL_LINK_SUFFIX))
 	$(call run,$(STRIP_CMD) --strip-all $@)
 else
 $(CORE_BIN): $(CORE_OBJS)
@@ -127,7 +129,7 @@ $(CORE_BIN): $(CORE_OBJS)
 	$(call run,$(STRIP_CMD) --strip-all $@)
 
 $(FULL_BIN): $(FULL_OBJS) $(APP_ASSETS)
-	$(call run,$(CC_CMD) $(FULL_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(FULL_OBJS))
+	$(call run,$(CC_CMD) $(FULL_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(FULL_OBJS) $(FULL_LDLIBS))
 	$(call run,$(STRIP_CMD) --strip-all $@)
 endif
 

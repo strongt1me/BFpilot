@@ -6,6 +6,7 @@
  */
 
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,6 +71,8 @@ detect_lan_ip(char *out, size_t out_size) {
 typedef struct ready_state {
   char ip[64];
   int notified;
+  int launcher_disabled;
+  int launcher_started;
 } ready_state_t;
 
 
@@ -109,6 +112,71 @@ init_ps5_services(void) {
   }
 
   bfpilot_diag_set_service_rcs(netctl_rc, user_service_rc);
+}
+#endif
+
+
+#if BFPILOT_ENABLE_LAUNCHER
+typedef struct launcher_thread_arg {
+  char ip[64];
+} launcher_thread_arg_t;
+
+
+static void *
+launcher_thread(void *arg) {
+  launcher_thread_arg_t *state = arg;
+  char fallback[128];
+
+  snprintf(fallback, sizeof(fallback), "Use http://%s:%u/",
+           state && state->ip[0] ? state->ip : "<PS5_IP>",
+           (unsigned int)BFPILOT_WEB_PORT);
+
+  bfpilot_checkpoint("launcher started");
+  bfpilot_diag_set_launcher_status("started", 0);
+  bfpilot_log("launcher started after web server");
+  init_ps5_services();
+
+  int app_install_status = bfpilot_install_app_if_needed();
+  if(app_install_status >= 0) {
+    bfpilot_diag_set_launcher_status("ready", app_install_status);
+    bfpilot_log("launcher ready rc=%d", app_install_status);
+    puts("  ps5 app: ready");
+  } else {
+    bfpilot_diag_set_launcher_status("failed_nonfatal", app_install_status);
+    bfpilot_log("launcher skipped rc=%d, web server remains available",
+                app_install_status);
+    bfpilot_notify("BFpilot launcher skipped", fallback);
+    puts("  ps5 app: launcher skipped, web server remains available");
+  }
+
+  free(state);
+  return NULL;
+}
+
+
+static void
+start_launcher_thread(const char *ip) {
+  launcher_thread_arg_t *state = calloc(1, sizeof(*state));
+  if(!state) {
+    bfpilot_diag_set_launcher_status("failed_nonfatal", -ENOMEM);
+    bfpilot_log("launcher skipped: failed allocating thread state");
+    bfpilot_notify("BFpilot launcher skipped", "Use http://<PS5_IP>:5905/");
+    return;
+  }
+  snprintf(state->ip, sizeof(state->ip), "%s", ip ? ip : "<PS5_IP>");
+
+  pthread_t thread;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  int rc = pthread_create(&thread, &attr, launcher_thread, state);
+  pthread_attr_destroy(&attr);
+  if(rc != 0) {
+    bfpilot_diag_set_launcher_status("failed_nonfatal", -rc);
+    bfpilot_log("launcher skipped: pthread_create rc=%d", rc);
+    bfpilot_notify("BFpilot launcher skipped", "Use http://<PS5_IP>:5905/");
+    free(state);
+  }
 }
 #endif
 
@@ -296,6 +364,13 @@ on_web_ready(unsigned short port, void *arg) {
     bfpilot_notify("BFpilot started", url);
     state->notified = 1;
   }
+
+#if BFPILOT_ENABLE_LAUNCHER
+  if(!state->launcher_disabled && !state->launcher_started) {
+    state->launcher_started = 1;
+    start_launcher_thread(state->ip);
+  }
+#endif
 }
 
 
@@ -322,6 +397,7 @@ main(int argc, char **argv) {
   memset(&ready, 0, sizeof(ready));
   detect_lan_ip(ready.ip, sizeof(ready.ip));
   int launcher_disabled = launcher_disabled_requested(argc, argv);
+  ready.launcher_disabled = launcher_disabled;
   websrv_set_runtime_diag(launcher_disabled);
   bfpilot_log("runtime launcher_disabled=%d", launcher_disabled);
 
@@ -351,22 +427,9 @@ main(int argc, char **argv) {
 
 #if BFPILOT_ENABLE_LAUNCHER
   if(!launcher_disabled) {
-    bfpilot_checkpoint("launcher started");
-    bfpilot_diag_set_launcher_status("started", 0);
-    bfpilot_log("launcher started");
-    init_ps5_services();
-
-    int app_install_status = bfpilot_install_app_if_needed();
-    if(app_install_status >= 0) {
-      bfpilot_diag_set_launcher_status("ready", app_install_status);
-      bfpilot_log("launcher ready rc=%d", app_install_status);
-      puts("  ps5 app: ready");
-    } else {
-      bfpilot_diag_set_launcher_status("failed", app_install_status);
-      bfpilot_log("launcher failed rc=%d, continuing web server",
-                  app_install_status);
-      puts("  ps5 app: install failed, continuing web server");
-    }
+    bfpilot_diag_set_launcher_status("deferred", BFPILOT_DIAG_SKIPPED);
+    bfpilot_log("launcher deferred until web server is listening");
+    puts("  ps5 app: launcher will run after web server starts");
   } else {
     bfpilot_diag_set_service_rcs(BFPILOT_DIAG_SKIPPED, BFPILOT_DIAG_SKIPPED);
     bfpilot_diag_set_launcher_status("skipped", BFPILOT_DIAG_SKIPPED);

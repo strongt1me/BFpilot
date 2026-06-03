@@ -121,10 +121,11 @@ This is the shape of a healthy core-mode response. Values such as `pid`,
 
 ```json
 {
+  "ok": true,
   "name": "BFpilot",
-  "version": "bfpilot-v0.2.1",
-  "buildVersion": "dev",
-  "buildMode": "core",
+  "tag": "bfpilot-v0.2.1",
+  "version": "dev",
+  "mode": "core",
   "pid": 112,
   "uptime": 14,
   "port": 5905,
@@ -136,28 +137,41 @@ This is the shape of a healthy core-mode response. Values such as `pid`,
   "can_write_data_bfpilot": true,
   "can_write_user_app": false,
   "launcher_status": "not_compiled",
-  "launcher_rc": -9999,
   "last_errno": 0,
-  "checkpoint": "web server listening",
-  "services": {
-    "sceNetCtlInit": -9999,
-    "sceUserServiceInitialize": -9999,
-    "notification": 0,
+  "checkpoint": "web server ready",
+  "core_server_started": true,
+  "launcher_attempted": false,
+  "appinst_init_rc": -2147483000,
+  "title_dir_resolved": false,
+  "install_title_rc": -2147483000,
+  "install_all_rc": -2147483000,
+  "uninstall_rc": -2147483000,
+  "launcher_final_state": "skipped",
+  "rcs": {
+    "sceNetCtlInit": -2147483000,
+    "sceUserServiceInitialize": -2147483000,
+    "notification_test": 0,
     "bind_5905": 0,
     "listen_5905": 0
   },
   "launcher": {
     "status": "not_compiled",
-    "rc": -9999,
-    "launcher_compiled": false,
-    "launcher_runtime_disabled": false,
+    "status_rc": -2147483000,
+    "compiled": false,
+    "disabled": true,
     "launcher_enabled": false,
-    "appinst_init_rc": -1,
+    "launcher_attempted": false,
+    "appinst_init_rc": -2147483000,
+    "title_dir_resolved": false,
     "install_title_dir_resolved": false,
+    "install_title_rc": -2147483000,
     "uninstall_resolved": false,
+    "uninstall_rc": -2147483000,
     "install_all_resolved": false,
+    "install_all_rc": -2147483000,
     "user_app_writable": null,
-    "launcher_install_rc": -1
+    "launcher_install_rc": -1,
+    "launcher_final_state": "skipped"
   },
   "routes": ["/", "/api/status", "/api/diag", "/fs", "/api/fs/*"]
 }
@@ -170,31 +184,45 @@ that launcher failure is recorded and the server remains reachable.
 
 ```json
 {
+  "ok": true,
   "name": "BFpilot",
-  "version": "bfpilot-v0.2.1",
-  "buildMode": "full",
+  "tag": "bfpilot-v0.2.1",
+  "mode": "full",
   "port": 5905,
   "can_opendir_data": true,
   "can_write_data_bfpilot": true,
-  "launcher_status": "failed",
-  "launcher_rc": -2,
-  "services": {
-    "notification": -1,
+  "launcher_status": "failed_nonfatal",
+  "core_server_started": true,
+  "launcher_attempted": true,
+  "appinst_init_rc": -2,
+  "title_dir_resolved": false,
+  "install_title_rc": -2147483000,
+  "install_all_rc": -2147483000,
+  "uninstall_rc": -2147483000,
+  "launcher_final_state": "failed_nonfatal",
+  "rcs": {
+    "notification_test": -1,
     "bind_5905": 0,
     "listen_5905": 0
   },
   "launcher": {
-    "status": "failed",
-    "rc": -2,
-    "launcher_compiled": true,
-    "launcher_runtime_disabled": false,
+    "status": "failed_nonfatal",
+    "status_rc": -1,
+    "compiled": true,
+    "disabled": false,
     "launcher_enabled": true,
-    "appinst_init_rc": -1,
+    "launcher_attempted": true,
+    "appinst_init_rc": -2,
+    "title_dir_resolved": false,
     "install_title_dir_resolved": false,
+    "install_title_rc": -2147483000,
     "uninstall_resolved": false,
-    "install_all_resolved": false,
+    "uninstall_rc": -2147483000,
+    "install_all_resolved": true,
+    "install_all_rc": -2147483000,
     "user_app_writable": false,
-    "launcher_install_rc": -2
+    "launcher_install_rc": -2,
+    "launcher_final_state": "failed_nonfatal"
   }
 }
 ```
@@ -224,9 +252,9 @@ that launcher failure is recorded and the server remains reachable.
 
 - This is not fatal in `v0.2.1`.
 - Confirm `http://<PS5_IP>:5905/` still opens.
-- Open `/api/diag` and record `launcher.appinst_init_rc`,
-  `launcher.install_title_dir_resolved`, `launcher.uninstall_resolved`,
-  `launcher.install_all_resolved`, `launcher.user_app_writable`, and
+- Open `/api/diag` and record `launcher_attempted`, `appinst_init_rc`,
+  `title_dir_resolved`, `install_title_rc`, `install_all_rc`, `uninstall_rc`,
+  `launcher_final_state`, `launcher.user_app_writable`, and
   `launcher.launcher_install_rc`.
 - If the file manager works, keep using the browser URL and report the launcher
   diagnostics separately.

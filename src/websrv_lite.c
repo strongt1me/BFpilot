@@ -35,12 +35,18 @@ static volatile sig_atomic_t g_websrv_exit_requested = 0;
 static int             g_launcher_runtime_disabled = 0;
 static bfpilot_launcher_diag_t g_launcher_diag = {
   .launcher_enabled = 0,
+  .launcher_attempted = 0,
   .appinst_init_rc = -1,
+  .title_dir_resolved = 0,
   .install_title_dir_resolved = 0,
+  .install_title_rc = BFPILOT_DIAG_SKIPPED,
   .uninstall_resolved = 0,
+  .uninstall_rc = BFPILOT_DIAG_SKIPPED,
   .install_all_resolved = 0,
+  .install_all_rc = BFPILOT_DIAG_SKIPPED,
   .user_app_writable = -1,
   .launcher_install_rc = -1,
+  .launcher_final_state = "skipped",
 };
 
 
@@ -49,6 +55,14 @@ websrv_set_runtime_diag(int launcher_disabled) {
   g_launcher_runtime_disabled = launcher_disabled ? 1 : 0;
   g_launcher_diag.launcher_enabled =
       BFPILOT_ENABLE_LAUNCHER && !g_launcher_runtime_disabled;
+  if(!g_launcher_diag.launcher_attempted) {
+    g_launcher_diag.appinst_init_rc = BFPILOT_DIAG_SKIPPED;
+    g_launcher_diag.install_title_rc = BFPILOT_DIAG_SKIPPED;
+    g_launcher_diag.uninstall_rc = BFPILOT_DIAG_SKIPPED;
+    g_launcher_diag.install_all_rc = BFPILOT_DIAG_SKIPPED;
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state), "%s", "skipped");
+  }
 }
 
 
@@ -337,10 +351,11 @@ status_request(const http_request_t *req) {
 
 static int
 diag_request(const http_request_t *req) {
-  char body[4096];
+  char body[6144];
   char cwd[256];
   char cwd_json[512];
   char launcher_status_json[128];
+  char launcher_final_json[64];
   char checkpoint_json[192];
   time_t now = time(NULL);
   int can_stat_root = bfpilot_diag_can_stat_root();
@@ -351,12 +366,16 @@ diag_request(const http_request_t *req) {
   int can_opendir_ext0_homebrew = bfpilot_diag_can_opendir_ext0_homebrew();
   int can_write_data = bfpilot_diag_can_write_data_bfpilot();
   int can_write_user_app = bfpilot_diag_can_write_user_app();
+  int core_server_started =
+      bfpilot_diag_bind_rc() == 0 && bfpilot_diag_listen_rc() == 0;
 
   bfpilot_diag_get_cwd(cwd, sizeof(cwd));
   int last_errno = bfpilot_diag_last_errno();
   json_error_escape(cwd_json, sizeof(cwd_json), cwd);
   json_error_escape(launcher_status_json, sizeof(launcher_status_json),
                     bfpilot_diag_launcher_status());
+  json_error_escape(launcher_final_json, sizeof(launcher_final_json),
+                    g_launcher_diag.launcher_final_state);
   json_error_escape(checkpoint_json, sizeof(checkpoint_json),
                     bfpilot_diag_checkpoint());
 
@@ -382,6 +401,14 @@ diag_request(const http_request_t *req) {
                    "\"launcher_status\":\"%s\","
                    "\"last_errno\":%d,"
                    "\"checkpoint\":\"%s\","
+                   "\"core_server_started\":%s,"
+                   "\"launcher_attempted\":%s,"
+                   "\"appinst_init_rc\":%d,"
+                   "\"title_dir_resolved\":%s,"
+                   "\"install_title_rc\":%d,"
+                   "\"install_all_rc\":%d,"
+                   "\"uninstall_rc\":%d,"
+                   "\"launcher_final_state\":\"%s\","
                    "\"rcs\":{"
                    "\"sceNetCtlInit\":%d,"
                    "\"sceUserServiceInitialize\":%d,"
@@ -394,12 +421,18 @@ diag_request(const http_request_t *req) {
                    "\"compiled\":%s,"
                    "\"disabled\":%s,"
                    "\"launcher_enabled\":%s,"
+                   "\"launcher_attempted\":%s,"
                    "\"appinst_init_rc\":%d,"
+                   "\"title_dir_resolved\":%s,"
                    "\"install_title_dir_resolved\":%s,"
+                   "\"install_title_rc\":%d,"
                    "\"uninstall_resolved\":%s,"
+                   "\"uninstall_rc\":%d,"
                    "\"install_all_resolved\":%s,"
+                   "\"install_all_rc\":%d,"
                    "\"user_app_writable\":%s,"
-                   "\"launcher_install_rc\":%d},"
+                   "\"launcher_install_rc\":%d,"
+                   "\"launcher_final_state\":\"%s\"},"
                    "\"notifications\":{\"mode\":\"optional-raw-debug\"},"
                    "\"routes\":[\"/\",\"/api/status\",\"/api/diag\","
                    "\"/fs\",\"/api/fs/*\"]}",
@@ -418,6 +451,14 @@ diag_request(const http_request_t *req) {
                    launcher_status_json,
                    last_errno,
                    checkpoint_json,
+                   json_bool(core_server_started),
+                   json_bool(g_launcher_diag.launcher_attempted),
+                   g_launcher_diag.appinst_init_rc,
+                   json_bool(g_launcher_diag.title_dir_resolved),
+                   g_launcher_diag.install_title_rc,
+                   g_launcher_diag.install_all_rc,
+                   g_launcher_diag.uninstall_rc,
+                   launcher_final_json,
                    bfpilot_diag_netctl_rc(),
                    bfpilot_diag_user_service_rc(),
                    bfpilot_diag_notification_rc(),
@@ -428,12 +469,18 @@ diag_request(const http_request_t *req) {
                    json_bool(BFPILOT_ENABLE_LAUNCHER),
                    json_bool(g_launcher_runtime_disabled),
                    json_bool(g_launcher_diag.launcher_enabled),
+                   json_bool(g_launcher_diag.launcher_attempted),
                    g_launcher_diag.appinst_init_rc,
+                   json_bool(g_launcher_diag.title_dir_resolved),
                    json_bool(g_launcher_diag.install_title_dir_resolved),
+                   g_launcher_diag.install_title_rc,
                    json_bool(g_launcher_diag.uninstall_resolved),
+                   g_launcher_diag.uninstall_rc,
                    json_bool(g_launcher_diag.install_all_resolved),
+                   g_launcher_diag.install_all_rc,
                    json_tristate(g_launcher_diag.user_app_writable),
-                   g_launcher_diag.launcher_install_rc);
+                   g_launcher_diag.launcher_install_rc,
+                   launcher_final_json);
   if(n < 0) return -1;
   if((size_t)n >= sizeof(body)) n = (int)sizeof(body) - 1;
   return websrv_send(req->fd, 200, "application/json", body, (size_t)n);

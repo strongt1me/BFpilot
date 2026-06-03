@@ -18,12 +18,18 @@ typedef void (*websrv_ready_cb_t)(unsigned short port, void *arg);
 
 typedef struct bfpilot_launcher_diag {
   int launcher_enabled;
+  int launcher_attempted;
   int appinst_init_rc;
+  int title_dir_resolved;
   int install_title_dir_resolved;
+  int install_title_rc;
   int uninstall_resolved;
+  int uninstall_rc;
   int install_all_resolved;
+  int install_all_rc;
   int user_app_writable;
   int launcher_install_rc;
+  char launcher_final_state[32];
 } bfpilot_launcher_diag_t;
 
 

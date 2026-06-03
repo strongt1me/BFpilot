@@ -1,71 +1,144 @@
-# BFpilot - minimal PS5 browser file manager payload.
+# BFpilot - reproducible PS5 payload builds.
+
+SHELL := bash
+
+ifeq ($(strip $(PS5_PAYLOAD_SDK)),)
+$(error PS5_PAYLOAD_SDK is required, e.g. export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk)
+endif
+
+include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+
+HOST_UNAME := $(shell uname -s 2>/dev/null || echo unknown)
+HOST_IS_WINDOWS := 0
+ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(HOST_UNAME)))
+HOST_IS_WINDOWS := 1
+endif
 
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-
-ifdef PS5_PAYLOAD_SDK
-    include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
-else
-    $(error PS5_PAYLOAD_SDK is undefined)
-endif
-
-VERSION_TAG := bfpilot-v0.2.0
-BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 PYTHON ?= python3
-HOST_LLVM_BINDIR ?= $(shell dirname "$$(command -v llvm-strip 2>/dev/null || command -v llvm-strip.exe 2>/dev/null || echo llvm-strip)" 2>/dev/null)
-LLVM_STRIP ?= llvm-strip
-UNIX_CURDIR := $(shell cygpath -u '$(CURDIR)' 2>/dev/null || pwd)
 
-export LLVM_BINDIR ?= $(HOST_LLVM_BINDIR)
-export LLVM_CONFIG ?= $(UNIX_CURDIR)/build-tools/llvm-config
-BUILD_PATH := $(UNIX_CURDIR)/build-tools:$(HOST_LLVM_BINDIR):/mingw64/bin:/usr/local/bin:/usr/bin:/bin:/c/Users/Blurf/scoop/shims
-BUILD_ENV := cd "$(UNIX_CURDIR)"; export LLVM_CONFIG="$(LLVM_CONFIG)"; export LLVM_BINDIR="$(LLVM_BINDIR)"; export PATH="$(BUILD_PATH):$$PATH"
+VERSION_TAG := bfpilot-v0.2.1
+BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-BIN := bfpilot.elf
+LLVM_BINDIR ?= $(shell dirname "$$(command -v clang 2>/dev/null || command -v clang.exe 2>/dev/null || command -v llvm-strip 2>/dev/null || command -v llvm-strip.exe 2>/dev/null || echo clang)" 2>/dev/null || echo .)
+LLVM_CONFIG ?= $(CURDIR)/build-tools/llvm-config
+export LLVM_BINDIR
+export LLVM_CONFIG
 
-SRCS := src/lite_main.c
-SRCS += src/websrv_lite.c
-SRCS += src/asset.c
-SRCS += src/fs.c
-SRCS += src/mime.c
-SRCS += src/notify.c
-SRCS += src/transfer.c
-SRCS += src/app_installer.c
+CORE_BIN := bfpilot-core.elf
+FULL_BIN := bfpilot-full.elf
 
-CFLAGS := -Os -Wall -Werror -Isrc
-CFLAGS += -ffunction-sections -fdata-sections
-CFLAGS += -flto
-CFLAGS += -DVERSION_TAG=\"$(VERSION_TAG)\"
-CFLAGS += -DBUILD_VERSION=\"$(BUILD_VERSION)\"
+COMMON_SRCS := src/lite_main.c
+COMMON_SRCS += src/diag.c
+COMMON_SRCS += src/websrv_lite.c
+COMMON_SRCS += src/asset.c
+COMMON_SRCS += src/fs.c
+COMMON_SRCS += src/mime.c
+COMMON_SRCS += src/notify.c
+COMMON_SRCS += src/transfer.c
 
-LDFLAGS := -Wl,--gc-sections -flto
-LDFLAGS += -B$(PS5_PAYLOAD_SDK)/win
-
-LDADD := -lkernel_sys -lSceNotification
-LDADD += -lSceIpmi -lSceAppInstUtil -lSceUserService -lSceSystemService
-LDADD += -lSceNetCtl
+FULL_SRCS := $(COMMON_SRCS)
+FULL_SRCS += src/app_installer.c
+FULL_SRCS += src/sce_resolve.c
 
 ASSETS := $(wildcard assets/*)
 GEN_SRCS := $(patsubst assets/%,gen/assets/%,$(ASSETS:=.c))
 APP_ASSETS := assets-app/param.json assets-app/icon0.png
+CORE_OBJS := $(patsubst %.c,build/core/%.o,$(COMMON_SRCS) $(GEN_SRCS))
+FULL_OBJS := $(patsubst %.c,build/full/%.o,$(FULL_SRCS) $(GEN_SRCS))
 
-all: $(BIN)
+COMMON_CFLAGS := -Os -Wall -Werror -Isrc
+COMMON_CFLAGS += -ffunction-sections -fdata-sections -flto
+COMMON_CFLAGS += -DVERSION_TAG=\"$(VERSION_TAG)\"
+COMMON_CFLAGS += -DBUILD_VERSION=\"$(BUILD_VERSION)\"
+COMMON_CFLAGS += -DBFPILOT_SDK_PATH=\"$(PS5_PAYLOAD_SDK)\"
+
+CORE_CFLAGS := $(COMMON_CFLAGS)
+CORE_CFLAGS += -DBFPILOT_ENABLE_LAUNCHER=0
+CORE_CFLAGS += -DBFPILOT_DISABLE_LAUNCHER=1
+CORE_CFLAGS += -DBFPILOT_BUILD_MODE=\"core\"
+
+FULL_CFLAGS := $(COMMON_CFLAGS)
+FULL_CFLAGS += -DBFPILOT_ENABLE_LAUNCHER=1
+FULL_CFLAGS += -DBFPILOT_BUILD_MODE=\"full\"
+
+COMMON_LDFLAGS := -Wl,--gc-sections -flto
+
+CC_CMD := "$(CC)"
+STRIP_CMD := "$(STRIP)"
+LD_CMD := "$(LD)"
+DEPLOY_CMD := "$(PS5_DEPLOY)"
+
+ifeq ($(HOST_IS_WINDOWS),1)
+CURDIR_POSIX := $(shell pwd)
+PS5_PAYLOAD_SDK_POSIX := $(shell cygpath -u "$(PS5_PAYLOAD_SDK)" 2>/dev/null || printf '%s' "$(PS5_PAYLOAD_SDK)")
+LLVM_CONFIG_POSIX := $(shell cygpath -u "$(LLVM_CONFIG)" 2>/dev/null || printf '%s' "$(LLVM_CONFIG)")
+LLVM_BINDIR_POSIX := $(shell cygpath -u "$(LLVM_BINDIR)" 2>/dev/null || printf '%s' "$(LLVM_BINDIR)")
+RUN_ENV := cd "$(CURDIR_POSIX)" && export LLVM_CONFIG="$(LLVM_CONFIG_POSIX)" && export LLVM_BINDIR="$(LLVM_BINDIR_POSIX)"
+STRIP_CMD := "$(LLVM_BINDIR_POSIX)/llvm-strip"
+WINDOWS_LINK_PREFIX := --gc-sections --sysroot="$(PS5_PAYLOAD_SDK_POSIX)"
+WINDOWS_LINK_PREFIX += -L"$(PS5_PAYLOAD_SDK_POSIX)/target/lib"
+WINDOWS_LINK_PREFIX += -L"$(PS5_PAYLOAD_SDK_POSIX)/target/user/homebrew/lib"
+WINDOWS_LINK_PREFIX += -l:crt1.o -l:crti.o -l:crtbegin.o -lc
+WINDOWS_LINK_SUFFIX := -lkernel_web -lSceLibcInternal -lSceNet
+WINDOWS_LINK_SUFFIX += -lc_stub_weak -lkernel_stub_weak
+WINDOWS_LINK_SUFFIX += -l:crtend.o -l:crtn.o
+define run
+bash -lc '$(RUN_ENV) && $(1)'
+endef
+else
+define run
+$(1)
+endef
+endif
+
+all: core full
+
+core: $(CORE_BIN)
+
+full: $(FULL_BIN)
 
 gen/assets:
-	mkdir -p gen/assets
+	$(call run,mkdir -p $@)
 
 gen/assets/%.c: assets/% | gen/assets
-	$(PYTHON) gen-asset-module.py --path $* $< > $@
+	$(call run,$(PYTHON) gen-asset-module.py --path $* $< > $@)
 
-$(BIN): $(SRCS) $(GEN_SRCS) $(APP_ASSETS)
-	bash -lc '$(BUILD_ENV); $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRCS) $(GEN_SRCS) $(LDADD)'
-	bash -lc 'cd "$(UNIX_CURDIR)"; test -f $@'
-	bash -lc '$(BUILD_ENV); $(LLVM_STRIP) --strip-all $@'
+build/core/%.o: %.c Makefile
+	$(call run,mkdir -p $(dir $@))
+	$(call run,$(CC_CMD) $(CORE_CFLAGS) -c $< -o $@)
 
-deploy: $(BIN)
-	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $<
+build/full/%.o: %.c Makefile
+	$(call run,mkdir -p $(dir $@))
+	$(call run,$(CC_CMD) $(FULL_CFLAGS) -c $< -o $@)
+
+ifeq ($(HOST_IS_WINDOWS),1)
+$(CORE_BIN): $(CORE_OBJS)
+	$(call run,$(LD_CMD) -o $@ $(WINDOWS_LINK_PREFIX) $(CORE_OBJS) $(WINDOWS_LINK_SUFFIX))
+	$(call run,$(STRIP_CMD) --strip-all $@)
+
+$(FULL_BIN): $(FULL_OBJS) $(APP_ASSETS)
+	$(call run,$(LD_CMD) -o $@ $(WINDOWS_LINK_PREFIX) $(FULL_OBJS) $(WINDOWS_LINK_SUFFIX))
+	$(call run,$(STRIP_CMD) --strip-all $@)
+else
+$(CORE_BIN): $(CORE_OBJS)
+	$(call run,$(CC_CMD) $(CORE_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(CORE_OBJS))
+	$(call run,$(STRIP_CMD) --strip-all $@)
+
+$(FULL_BIN): $(FULL_OBJS) $(APP_ASSETS)
+	$(call run,$(CC_CMD) $(FULL_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(FULL_OBJS))
+	$(call run,$(STRIP_CMD) --strip-all $@)
+endif
+
+deploy-core: core
+	$(call run,$(DEPLOY_CMD) -h $(PS5_HOST) -p $(PS5_PORT) $(CORE_BIN))
+
+deploy-full: full
+	$(call run,$(DEPLOY_CMD) -h $(PS5_HOST) -p $(PS5_PORT) $(FULL_BIN))
 
 clean:
-	rm -rf $(BIN) gen
+	$(call run,rm -rf $(CORE_BIN) $(FULL_BIN) build gen)
 
-.PHONY: all clean deploy
+.SECONDARY: $(GEN_SRCS)
+.PHONY: all core full clean deploy-core deploy-full

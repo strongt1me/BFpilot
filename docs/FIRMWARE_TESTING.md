@@ -1,189 +1,212 @@
 # BFpilot Firmware Testing
 
-This protocol checks whether BFpilot runs safely across jailbroken PS5 firmwares and loaders. It does not require exploit changes, kernel patching, package loading, or DRM-related features.
+Use this protocol on every firmware/loader combination. Test the file manager
+first. Test launcher/AppInstUtil only after the file manager works.
 
-Use `bfpilot-core.elf` first on every firmware. Only test `bfpilot-full.elf` after the core server is confirmed working.
+Record:
 
-## Before Testing
-
-Record these details before each run:
-
-- PS5 firmware version.
-- Exploit and loader name/version.
-- Payload file used: `bfpilot-core.elf` or `bfpilot-full.elf`.
-- PS5 IP address.
-- Sender tool and command used.
-- Whether `/data/BFpilot/log.txt` and `/data/BFpilot/crash.log` exist after the run.
-
-Clear old browser tabs that point to BFpilot before reinjecting. If a stage fails, keep the PS5 powered on long enough to collect `/data/BFpilot/log.txt`, `/data/BFpilot/crash.log`, `/api/status`, and `/api/diag` if reachable.
-
-## Stage A: Core Server Only
-
-Purpose: prove the firmware and loader can run BFpilot's standalone HTTP file manager without launcher installation.
-
-1. Send `bfpilot-core.elf` to the loader on port `9021`.
-2. Verify the sender console reports that the ELF was delivered without socket/send errors.
-3. Watch for BFpilot startup output from the loader console, if available.
-4. Confirm `/data/BFpilot/log.txt` is created or appended.
-5. Open `http://PS5_IP:5905/` in a browser on the same network.
-6. Open `http://PS5_IP:5905/api/status`.
-7. Open `http://PS5_IP:5905/api/diag`.
-8. Browse `/data` in the file manager.
-9. Browse `/mnt/usb0` with an external drive connected.
-10. Create or open `/data/BFpilot-test`.
-11. Upload a small text file to `/data/BFpilot-test`.
-12. Copy that text file to another name in `/data/BFpilot-test`.
-13. Move or rename the copied file.
-14. Delete the moved file.
-15. Delete the original uploaded test file.
-16. Reopen `/api/diag` and save the output.
-
-Pass criteria:
-
-- The server starts on port `5905`.
-- `/`, `/api/status`, `/api/diag`, `/fs`, and `/api/fs/*` are reachable.
-- Browsing `/data` works.
-- Browsing `/mnt/usb0` either works or fails cleanly with a clear permission/path error.
-- Upload, copy, move, and delete work inside `/data/BFpilot-test`.
-- No crash log is created during normal file operations.
-
-Fail data to collect:
-
-- Sender console output.
-- `/data/BFpilot/log.txt`.
-- `/data/BFpilot/crash.log`, if present.
-- The HTTP status and response body from `/api/status` and `/api/diag`, if reachable.
-- Exact browser error if the page times out.
-
-## Stage B: Notification Enabled
-
-Purpose: verify notification support is optional and cannot stop the web server.
-
-1. Start from a PS5 state where Stage A passed.
-2. Send `bfpilot-core.elf` again, or start `bfpilot-full.elf` with launcher disabled using `--no-launcher` or `BFPILOT_NO_LAUNCHER=1` if the loader supports arguments/environment.
-3. Trigger the BFpilot notification path by starting the payload and watching for the startup notification attempt.
-4. Open `http://PS5_IP:5905/`.
-5. Open `http://PS5_IP:5905/api/diag`.
-6. Check `/data/BFpilot/log.txt` for notification return code entries.
-
-Pass criteria:
-
-- If a notification appears, the server still starts.
-- If the notification fails, the server still starts.
-- `/api/diag` remains reachable after the notification attempt.
-- The log records the notification result when available.
-
-Fail data to collect:
-
+- Firmware version.
+- Exploit/loader name and version.
+- Payload name.
+- Whether `/data/BFpilot/boot.log` received a new entry.
 - Whether a notification appeared.
-- Notification return code from `/data/BFpilot/log.txt`.
-- `/api/diag` output after startup.
+- Whether the HTTP server started.
+- `/api/status` and `/api/diag` output when reachable.
+- Relevant log files under `/data/BFpilot`.
 
-## Stage C: Launcher Enabled
+## Stage A: Main File Manager
 
-Purpose: verify full mode can attempt launcher install/refresh without making launcher failure fatal.
+1. Send `bfpilot.elf` to the loader on port `9021`.
+2. Verify `BFpilot BOOT` notification if notifications are working.
+3. Verify `/data/BFpilot/boot.log` has a new `bfpilot file-manager` entry.
+4. Open `http://PS5_IP:5905/`.
+5. Open `http://PS5_IP:5905/api/status`.
+6. Open `http://PS5_IP:5905/api/diag`.
+7. Browse `/data`.
+8. Browse `/mnt/usb0` if an external drive is connected.
+9. Upload a small text file to `/data/BFpilot-test`.
+10. Copy, move, and delete that test file.
+11. Save `/data/BFpilot/log.txt`.
 
-Only run this stage after Stage A passes on the same firmware and loader.
+Pass criteria:
+
+- Boot marker appears.
+- Server starts on port `5905`.
+- `/`, `/api/status`, `/api/diag`, `/fs`, and `/api/fs/*` are reachable.
+- Basic file operations work in `/data/BFpilot-test`.
+
+## Stage B: Debug File Manager
+
+Use this when Stage A appears to do nothing or when testing a new loader.
+
+1. Send `bfpilot-debug.elf` to the loader on port `9021`.
+2. Verify `/data/BFpilot/boot.log` has a new `bfpilot-debug debug` entry.
+3. Open `http://PS5_IP:5905/api/status`.
+4. Open `http://PS5_IP:5905/api/diag`.
+5. Save `/data/BFpilot/log.txt`.
+
+Expected result:
+
+- If `boot.log` has no new entry, the payload likely failed before `main()` or
+  the loader rejected it.
+- If `boot.log` has an entry but `/api/status` is unreachable, the failure is
+  after `main()` and before or during server startup.
+
+## Stage C: Alternate Port
+
+Use this when another BFpilot instance may already be running on `5905`.
+
+1. Send `bfpilot-debug.elf --port 5906` to the loader.
+2. Open `http://PS5_IP:5906/api/status`.
+3. Open `http://PS5_IP:5906/api/diag`.
+4. Save `/data/BFpilot/log.txt`.
+
+Pass criteria:
+
+- The new payload can start on `5906` without touching the old server on `5905`.
+
+## Stage D: Reinjection
+
+1. Start `bfpilot.elf`.
+2. Reinject `bfpilot.elf` while idle.
+3. Verify notification `BFpilot reload: old server detected`.
+4. Verify the old listener stops cleanly and the new server starts.
+5. Start a large copy or move.
+6. Reinject `bfpilot.elf` during the active job.
+7. Verify notification `BFpilot reload blocked`.
+8. Verify the old job is not killed.
+9. Save `/data/BFpilot/log.txt`.
+
+Pass criteria:
+
+- Idle reinjection performs a clean handoff.
+- Active file jobs are not interrupted.
+- Reload exits are logged and notified instead of appearing silent.
+
+## Stage E: Launcher Installer
+
+Only run this after Stage A passes on the same firmware/loader.
+
+### Integrated Full Build
+
+This is the first installer-capable build to try on firmware 11.6, because it
+preserves the 0.2.0-style launcher flow that already installed there.
 
 1. Send `bfpilot-full.elf` to the loader on port `9021`.
-2. Watch for launcher install or refresh messages.
+2. Watch for `BFpilot BOOT`, `BFpilot app`, and `BFpilot started`
+   notifications.
 3. Open `http://PS5_IP:5905/`.
-4. Open `http://PS5_IP:5905/api/status`.
-5. Open `http://PS5_IP:5905/api/diag`.
-6. Record the launcher fields from `/api/diag`.
-7. Check whether the BFpilot launcher tile appears or refreshes on the PS5 home screen.
-8. If the launcher tile does not appear, keep testing the web server anyway.
-9. Browse `/data`.
-10. Upload a small text file to `/data/BFpilot-test`.
-11. Delete the uploaded test file.
-12. Save `/data/BFpilot/log.txt`.
+4. Save `/data/BFpilot/log.txt`.
+5. Open `http://PS5_IP:5905/api/diag` if the web server starts.
+6. Check whether the BFpilot tile appears or refreshes.
+
+Pass criteria:
+
+- On firmware where AppInstUtil runtime resolution works, the tile installs or
+  refreshes.
+- If launcher install fails, the web server still starts and logs the exact
+  AppInst resolution/init/install return codes.
+
+### Isolated Direct Installer
+
+Use this after Stage A if you want to test the direct AppInst import pattern
+used by websrv/Payload Manager/ftpsrv. It may fail before `main()` if the loader
+rejects AppInstUtil imports.
+
+1. Send `bfpilot-launcher-installer.elf` to the loader on port `9021`.
+2. Watch for `BFpilot BOOT` and launcher installer notifications.
+3. Check whether the BFpilot tile appears or refreshes.
+4. Save `/data/BFpilot/launcher-installer.log`.
+5. Save `/data/BFpilot/boot.log`.
+
+Launcher installer fields to record from the log:
+
+- `entered main`.
+- `AppInst init return code`.
+- `/user/app/BFPL00001` mkdir return code.
+- `param.json` and `icon0.png` write return code.
+- `AppInstallTitleDir resolved`.
+- `AppInstallTitleDir return code`.
+- `AppInstallAll fallback return code`.
+- `final result`.
 
 Pass criteria:
 
 - Launcher install may succeed or fail.
-- Launcher failure must not stop the HTTP server.
-- `/api/diag` records AppInstUtil resolution and return codes.
-- File browsing and basic file operations still work after any launcher failure.
+- Launcher failure does not affect `bfpilot.elf`.
+- File manager remains testable through `http://PS5_IP:5905/`.
 
-Launcher fields to record:
+If the direct installer gives no notification and no log:
 
-- `launcher_enabled`.
-- `launcher_attempted`.
-- `appinst_init_rc`.
-- `title_dir_resolved`.
-- `install_title_dir_resolved`.
-- `install_title_rc`.
-- `uninstall_resolved`.
-- `uninstall_rc`.
-- `install_all_resolved`.
-- `install_all_rc`.
-- `user_app_writable`.
-- `launcher_install_rc`.
-- `launcher_final_state`.
+1. Send `bfpilot-launcher-installer-safe.elf`.
+2. Save `/data/BFpilot/launcher-installer.log`.
+3. If the safe installer reaches `main()` but logs
+   `kernel_dynlib_handle libSceAppInstUtil.sprx rc=0xffffffff`, AppInstUtil is
+   not available through the safe runtime path.
+4. If `tests/installer_linkonly_appinst.elf` also produces no marker, direct
+   AppInst imports fail before `main()` on that loader/firmware.
 
-Fail data to collect:
+In that case the direct installer is being rejected before it can run, while
+the main file manager remains usable through `http://PS5_IP:5905/`.
 
-- The last launcher-related lines from `/data/BFpilot/log.txt`.
-- Full `/api/diag` output.
-- Whether the tile appeared, refreshed, disappeared, or did not change.
-- Whether the web server continued running after launcher failure.
+## Stage F: Minimal Probe Payloads
 
-## Stage D: Reinjection
+Use these to isolate loader, notification, HTTP, and AppInstUtil behavior.
 
-Purpose: verify reinjecting BFpilot does not kill unrelated payloads or interrupt active work in an unsafe way.
+### `tests/hello_boot.elf`
 
-1. Start `bfpilot-core.elf`.
-2. Open `http://PS5_IP:5905/` and confirm the server is idle.
-3. Inject `bfpilot-core.elf` again while idle.
-4. Verify the web server still responds.
-5. Open `/api/diag` and record uptime, PID, and any old-instance message.
-6. Start a copy operation using a test file inside `/data/BFpilot-test`.
-7. While the copy is active, inject `bfpilot-core.elf` again.
-8. Verify the old copy job is not killed by the new injection.
-9. Verify the web server remains reachable after the copy finishes.
-10. Repeat the idle reinjection test once with `bfpilot-full.elf` only after full mode passed Stage C.
+1. Send `tests/hello_boot.elf`.
+2. Verify boot marker notification.
+3. Verify `/data/BFpilot/boot.log`.
+4. Wait 10 seconds for `BFpilot BOOT still alive`.
 
-Pass criteria:
+### `tests/hello_http.elf`
 
-- Reinjection while idle leaves one reachable BFpilot server.
-- Reinjection during active copy does not kill the active job.
-- Existing unrelated payloads are not forcibly unloaded.
-- Logs clearly state whether the new instance started, reused an existing state, or exited because another BFpilot instance was already active.
+1. Send `tests/hello_http.elf`.
+2. Open `http://PS5_IP:5906/api/status`.
 
-Fail data to collect:
+### `tests/hello_notify.elf`
 
-- `/data/BFpilot/log.txt` from before and after reinjection.
-- `/api/diag` before reinjection, during copy, and after copy.
-- File copy source, destination, size, and whether the destination completed correctly.
-- Sender console output for each injection.
+1. Send `tests/hello_notify.elf`.
+2. Record notification result from sender output and `/data/BFpilot/boot.log`.
+
+### `tests/installer_enter_probe.elf`
+
+1. Send `tests/installer_enter_probe.elf`.
+2. Verify `/data/BFpilot/installer_enter_probe.txt` exists.
+3. If it does not exist, the loader rejected even the safe installer-shaped
+   probe before `main()`.
+
+### `tests/installer_linkonly_appinst.elf`
+
+1. Send `tests/installer_linkonly_appinst.elf`.
+2. Verify `/data/BFpilot/linkonly_appinst_entered.txt` exists.
+3. If it does not exist, direct AppInstUtil linking is incompatible with that
+   loader/firmware and installer code must avoid direct AppInst imports.
+
+### `tests/installer_runtime_resolve_appinst.elf`
+
+1. Send `tests/installer_runtime_resolve_appinst.elf`.
+2. Verify `/data/BFpilot/runtime_resolve_entered.txt` exists.
+3. Save `/data/BFpilot/runtime_resolve_appinst.log`.
+4. Use the log to see whether `kernel_dynlib_handle`, symbol lookup, and NID
+   resolve reached AppInstUtil.
+
+Interpretation:
+
+- `kernel_dynlib_handle ... rc=0xffffffff` means AppInstUtil is not already
+  loaded in this process.
+- BFpilot intentionally skips `dlopen` for AppInstUtil after a prior test stops
+  before the `dlopen` result log, because that path is not safe enough for a
+  compatibility payload.
 
 ## Compatibility Table
 
-| firmware | exploit/loader | payload used | server starts | file browse | upload | copy | move | delete | launcher install | notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 11.60 |  | `bfpilot-core.elf` |  |  |  |  |  |  | N/A |  |
-| 11.60 |  | `bfpilot-full.elf` |  |  |  |  |  |  |  |  |
-| 12.70 |  | `bfpilot-core.elf` |  |  |  |  |  |  | N/A |  |
-| 12.70 |  | `bfpilot-full.elf` |  |  |  |  |  |  |  |  |
-|  |  | `bfpilot-core.elf` |  |  |  |  |  |  | N/A |  |
-|  |  | `bfpilot-full.elf` |  |  |  |  |  |  |  |  |
-
-Use `yes`, `no`, or `partial` for result columns. Put exact error codes, HTTP status codes, and log checkpoints in `notes`.
-
-## Recommended Report Format
-
-```text
-Firmware:
-Exploit/loader:
-Payload:
-Sender command/tool:
-PS5 IP:
-Server URL:
-Stage passed:
-First failing step:
-/api/status result:
-/api/diag result:
-Relevant log lines:
-Crash log present:
-Notes:
-```
+| firmware | exploit/loader | payload used | boot marker | server starts | file browse | upload | copy | move | delete | launcher install | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12.70 |  | bfpilot.elf |  |  |  |  |  |  |  | n/a |  |
+| 12.70 |  | bfpilot-full.elf |  |  |  |  |  |  |  |  |  |
+| 12.70 |  | bfpilot-launcher-installer.elf |  | n/a | n/a | n/a | n/a | n/a | n/a |  |  |
+| 11.60 |  | bfpilot.elf |  |  |  |  |  |  |  | n/a |  |
+| 11.60 |  | bfpilot-full.elf |  |  |  |  |  |  |  |  |  |
+| 11.60 |  | bfpilot-launcher-installer.elf |  | n/a | n/a | n/a | n/a | n/a | n/a |  |  |

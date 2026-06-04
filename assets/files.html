@@ -651,7 +651,8 @@
       uploadBusy: false,
       uploadAbort: false,
       uploadXhr: null,
-      jobTimer: 0
+      jobTimer: 0,
+      jobHideTimer: 0
     };
 
     function el(id) {
@@ -791,6 +792,10 @@
       if (state.jobTimer) {
         clearInterval(state.jobTimer);
         state.jobTimer = 0;
+      }
+      if (state.jobHideTimer) {
+        clearTimeout(state.jobHideTimer);
+        state.jobHideTimer = 0;
       }
       el('job').classList.add('show');
       el('job-verb').textContent = verb || 'Working';
@@ -1075,6 +1080,7 @@
           const done = await waitJobIdle();
           if (done.error) throw new Error(done.error);
         } catch (err) {
+          if ((err.message || '').toLowerCase().includes('job')) pollJob();
           toast(verb + ': ' + err.message, 'err');
           break;
         }
@@ -1153,6 +1159,7 @@
           const done = await waitJobIdle();
           if (done.error) throw new Error(done.error);
         } catch (err) {
+          if ((err.message || '').toLowerCase().includes('job')) pollJob();
           toast('delete: ' + err.message, 'err');
           break;
         }
@@ -1250,7 +1257,9 @@
         toast(ok + ' uploaded' + (failed ? ', ' + failed + ' failed' : ''), failed ? 'err' : 'ok');
       }
       setTimeout(() => {
-        if (!state.uploadBusy && !state.jobTimer) el('job').classList.remove('show');
+        if (!state.uploadBusy && !state.jobTimer && !state.jobHideTimer) {
+          el('job').classList.remove('show');
+        }
       }, 1600);
     }
 
@@ -1261,6 +1270,10 @@
       const verb = el('job-verb');
 
       if (state.jobTimer) clearInterval(state.jobTimer);
+      if (state.jobHideTimer) {
+        clearTimeout(state.jobHideTimer);
+        state.jobHideTimer = 0;
+      }
       box.classList.add('show');
       text.textContent = 'Starting';
       let missed = 0;
@@ -1279,7 +1292,17 @@
             clearInterval(state.jobTimer);
             state.jobTimer = 0;
             if (job.error) toast(job.error, 'err');
-            setTimeout(() => box.classList.remove('show'), 1400);
+            state.jobHideTimer = setTimeout(async () => {
+              state.jobHideTimer = 0;
+              try {
+                const latest = await api('/api/fs/job/status');
+                if (latest.busy) {
+                  pollJob();
+                  return;
+                }
+              } catch (err) {}
+              if (!state.uploadBusy && !state.jobTimer) box.classList.remove('show');
+            }, 1400);
           }
         } catch (err) {
           missed++;

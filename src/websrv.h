@@ -57,6 +57,8 @@ void websrv_set_runtime_diag(int launcher_disabled);
 
 void websrv_set_launcher_diag(const bfpilot_launcher_diag_t *diag);
 
+void websrv_set_runtime_port(unsigned short port);
+
 void websrv_request_exit(void);
 
 int websrv_exit_requested(void);

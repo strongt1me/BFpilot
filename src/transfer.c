@@ -19,11 +19,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "diag.h"
 #include "transfer.h"
 #include "websrv.h"
 
 
-#define COPY_BUF_SIZE   (1024 * 1024)
+#define COPY_BUF_SIZE   (256 * 1024)
 #define UPLOAD_BUF_SIZE (256 * 1024)
 
 
@@ -259,6 +260,8 @@ job_end(int rc, const char *err) {
     snprintf(g_job.error, sizeof(g_job.error), "%s", err);
   }
   pthread_mutex_unlock(&g_job.lock);
+  bfpilot_log("transfer job end verb=%s rc=%d error=%s",
+              g_job.verb, rc, err ? err : "");
   atomic_store(&g_job.busy, 0);
 }
 
@@ -301,7 +304,7 @@ copy_file(const char *src, const char *dst) {
     job_set_error("open(%s): %s", src, strerror(errno));
     return -1;
   }
-  int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+  int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0777);
   if(out < 0) {
     job_set_error("open(%s): %s", dst, strerror(errno));
     close(in);
@@ -356,7 +359,14 @@ copy_file(const char *src, const char *dst) {
 
   free(buf);
   close(in);
-  close(out);
+  if(rc == 0 && fsync(out) != 0 && errno != EINVAL) {
+    job_set_error("sync(%s): %s", dst, strerror(errno));
+    rc = -1;
+  }
+  if(close(out) != 0 && rc == 0) {
+    job_set_error("close(%s): %s", dst, strerror(errno));
+    rc = -1;
+  }
   if(rc != 0) unlink(dst);
   return rc;
 }
@@ -452,6 +462,41 @@ delete_recursive(const char *path, int count_progress) {
 }
 
 
+static int
+delete_recursive_force(const char *path) {
+  struct stat st;
+  if(lstat(path, &st) != 0) {
+    return errno == ENOENT ? 0 : -1;
+  }
+
+  if(S_ISDIR(st.st_mode)) {
+    DIR *d = opendir(path);
+    if(!d) return -1;
+    int rc = 0;
+    struct dirent *ent;
+    while((ent = readdir(d))) {
+      if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+      char child[1024];
+      if(strlen(path) + strlen(ent->d_name) + 2 >= sizeof(child)) {
+        errno = ENAMETOOLONG;
+        rc = -1;
+        break;
+      }
+      join_path(child, sizeof(child), path, ent->d_name);
+      if(delete_recursive_force(child) != 0) {
+        rc = -1;
+        break;
+      }
+    }
+    closedir(d);
+    if(rc != 0) return -1;
+    return rmdir(path);
+  }
+
+  return unlink(path);
+}
+
+
 struct copy_arg {
   char src[1024];
   char dst[1024];
@@ -463,9 +508,12 @@ static void *
 copy_worker(void *arg) {
   struct copy_arg *a = arg;
   long files = 0, bytes = 0;
-  struct stat src_st, dst_st;
+  struct stat src_st, dst_st, final_st;
   char final_dst[1024];
+  char staging_dst[1024];
 
+  bfpilot_log("transfer worker start verb=%s src=%s dst=%s",
+              a->is_move ? "move" : "copy", a->src, a->dst);
   if(lstat(a->src, &src_st) != 0) {
     job_end(-1, "source not found");
     free(a);
@@ -513,6 +561,27 @@ copy_worker(void *arg) {
   }
   join_path(final_dst, sizeof(final_dst), a->dst, base);
 
+  if(lstat(final_dst, &final_st) == 0) {
+    job_end(-1, "destination already exists");
+    free(a);
+    return NULL;
+  }
+  if(errno != ENOENT) {
+    char err[160];
+    snprintf(err, sizeof(err), "destination: %s", strerror(errno));
+    job_end(-1, err);
+    free(a);
+    return NULL;
+  }
+
+  int n = snprintf(staging_dst, sizeof(staging_dst), "%s.bfpilot-part-%ld-%ld",
+                   final_dst, (long)getpid(), (long)time(NULL));
+  if(n < 0 || (size_t)n >= sizeof(staging_dst)) {
+    job_end(-1, "staging path too long");
+    free(a);
+    return NULL;
+  }
+
   if(!strcmp(a->src, final_dst)) {
     job_end(-1, "source and destination are the same");
     free(a);
@@ -546,22 +615,36 @@ copy_worker(void *arg) {
       free(a);
       return NULL;
     }
+    bfpilot_log("transfer move cross-device fallback src=%s staging=%s final=%s",
+                a->src, staging_dst, final_dst);
   }
 
-  int rc = copy_recursive(a->src, final_dst);
+  int rc = copy_recursive(a->src, staging_dst);
   if(rc != 0) {
     char err[160];
     snprintf(err, sizeof(err), "copy: %s",
              job_cancelled() ? "cancelled" : strerror(errno));
+    (void)delete_recursive_force(staging_dst);
     job_end(-1, err);
     free(a);
     return NULL;
   }
   if(job_cancelled()) {
+    (void)delete_recursive_force(staging_dst);
     job_end(-1, "cancelled");
     free(a);
     return NULL;
   }
+  job_set_current("Finalizing destination");
+  if(rename(staging_dst, final_dst) != 0) {
+    char err[160];
+    snprintf(err, sizeof(err), "finalize: %s", strerror(errno));
+    (void)delete_recursive_force(staging_dst);
+    job_end(-1, err);
+    free(a);
+    return NULL;
+  }
+  bfpilot_log("transfer finalized staging=%s final=%s", staging_dst, final_dst);
   if(a->is_move && delete_recursive(a->src, 0) != 0) {
     char err[160];
     snprintf(err, sizeof(err), "post-move cleanup: %s",
@@ -569,6 +652,9 @@ copy_worker(void *arg) {
     job_end(-1, err);
     free(a);
     return NULL;
+  }
+  if(a->is_move) {
+    bfpilot_log("transfer source cleanup complete src=%s", a->src);
   }
 
   job_end(0, NULL);
@@ -847,6 +933,8 @@ spawn_copy_or_move(const http_request_t *req, int is_move) {
   if(!job_begin(is_move ? "move" : "copy")) {
     return serve_error(req, 409, "another file-manager job is already running");
   }
+  bfpilot_log("transfer job begin verb=%s src=%s dst=%s",
+              is_move ? "move" : "copy", src, dst);
 
   struct copy_arg *a = calloc(1, sizeof(*a));
   if(!a) {

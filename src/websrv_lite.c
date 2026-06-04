@@ -28,10 +28,15 @@
 #define HEADER_MAX 65536
 #define CONTROL_TOKEN "bs5fm-local-reload"
 
+#ifndef BFPILOT_WEB_PORT
+#define BFPILOT_WEB_PORT 5905
+#endif
+
 
 static int             g_websrv_srvfd = -1;
 static pthread_mutex_t g_websrv_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t g_websrv_exit_requested = 0;
+static unsigned short  g_websrv_port = BFPILOT_WEB_PORT;
 static int             g_launcher_runtime_disabled = 0;
 static bfpilot_launcher_diag_t g_launcher_diag = {
   .launcher_enabled = 0,
@@ -73,6 +78,14 @@ websrv_set_launcher_diag(const bfpilot_launcher_diag_t *diag) {
   g_launcher_diag.launcher_enabled =
       BFPILOT_ENABLE_LAUNCHER && !g_launcher_runtime_disabled &&
       diag->launcher_enabled;
+}
+
+
+void
+websrv_set_runtime_port(unsigned short port) {
+  if(port != 0) {
+    g_websrv_port = port;
+  }
 }
 
 
@@ -338,11 +351,12 @@ status_request(const http_request_t *req) {
                    "\"services\":[\"web\",\"file-manager\"],"
                    "\"launcherCompiled\":%s,"
                    "\"launcherDisabled\":%s,"
-                   "\"port\":5905}",
+                   "\"port\":%u}",
                    VERSION_TAG, BUILD_VERSION, BFPILOT_BUILD_MODE,
                    (long)getpid(), (long)now,
                    BFPILOT_ENABLE_LAUNCHER ? "true" : "false",
-                   g_launcher_runtime_disabled ? "true" : "false");
+                   g_launcher_runtime_disabled ? "true" : "false",
+                   (unsigned int)g_websrv_port);
   if(n < 0) return -1;
   if((size_t)n >= sizeof(body)) n = (int)sizeof(body) - 1;
   return websrv_send(req->fd, 200, "application/json", body, (size_t)n);
@@ -388,7 +402,7 @@ diag_request(const http_request_t *req) {
                    "\"pid\":%ld,"
                    "\"now\":%ld,"
                    "\"uptime\":%ld,"
-                   "\"port\":5905,"
+                   "\"port\":%u,"
                    "\"cwd\":\"%s\","
                    "\"can_stat_root\":%s,"
                    "\"can_opendir_data\":%s,"
@@ -413,6 +427,8 @@ diag_request(const http_request_t *req) {
                    "\"sceNetCtlInit\":%d,"
                    "\"sceUserServiceInitialize\":%d,"
                    "\"notification_test\":%d,"
+                   "\"bind_port\":%u,"
+                   "\"listen_port\":%u,"
                    "\"bind_5905\":%d,"
                    "\"listen_5905\":%d},"
                    "\"launcher\":{"
@@ -439,6 +455,7 @@ diag_request(const http_request_t *req) {
                    VERSION_TAG, BUILD_VERSION, BFPILOT_BUILD_MODE,
                    (long)getpid(), (long)now,
                    bfpilot_diag_uptime(),
+                   (unsigned int)g_websrv_port,
                    cwd_json,
                    json_bool(can_stat_root),
                    json_bool(can_opendir_data),
@@ -462,6 +479,8 @@ diag_request(const http_request_t *req) {
                    bfpilot_diag_netctl_rc(),
                    bfpilot_diag_user_service_rc(),
                    bfpilot_diag_notification_rc(),
+                   (unsigned int)g_websrv_port,
+                   (unsigned int)g_websrv_port,
                    bfpilot_diag_bind_rc(),
                    bfpilot_diag_listen_rc(),
                    launcher_status_json,
@@ -621,6 +640,8 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
               void *ready_arg) {
   struct sockaddr_in server_addr;
   int srvfd;
+
+  websrv_set_runtime_port(port);
 
   signal(SIGPIPE, SIG_IGN);
 

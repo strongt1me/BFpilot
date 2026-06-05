@@ -3,8 +3,7 @@
 BFpilot is a small PS5 userland payload that starts a browser-based file
 manager on port `5905`.
 
-It is intentionally narrow: no exploit code, no PKG installer, no FTP daemon,
-no mounting tools, no payload bundle, and no DRM or backup features.
+It is intentionally narrow: no daemons,or anythink that doesnt serve the purpose of a file manager
 
 Current prepared release: `v0.2.1`
 

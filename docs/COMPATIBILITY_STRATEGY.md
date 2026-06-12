@@ -51,6 +51,9 @@ It is intentionally isolated from the file manager:
 
 - It direct-links AppInstUtil, matching the launcher-install pattern used by
   websrv, Payload Manager, and ftpsrv.
+- It also links `kernel_sys`, SystemService, and UserService, initializes
+  UserService, temporarily sets authid `0x4801000000000013`, and restores the
+  original authid after registration.
 - It logs to `/data/BFpilot/launcher-installer.log`.
 - It cannot break the file manager because it is not part of `bfpilot.elf`.
 
@@ -78,11 +81,11 @@ The current probes separate three cases:
   `kernel_dynlib_handle` returns `0xffffffff`, AppInstUtil is not reachable
   through the safe runtime path.
 
-On that combination, the safe runtime path cannot install. The force installer
-uses the fragile direct AppInst import path because that is the pattern used by
-working launcher installers. If the loader rejects that import before `main()`,
-no code inside that ELF can recover. The file manager remains supported because
-it avoids that import entirely.
+The AppInst-only direct probe can fail even when the complete websrv pattern
+works. `tests/installer_websrv_pattern.elf` reproduces the full dependency and
+privilege setup without registering a title. On the tested live PS5 it reached
+`main()` and returned zero from AppInst initialization; the repaired isolated
+installer then registered the tile successfully.
 
 ## Patterns Checked
 
@@ -98,11 +101,10 @@ That pattern can work in environments where direct AppInst imports are accepted,
 but it can also fail before `main()` on loaders that reject or cannot satisfy
 the import. BFpilot keeps this pattern out of `bfpilot.elf`.
 
-Some payloads also depend on a system-authid or other elevated runtime context
-before AppInst init can succeed on newer firmware. BFpilot does not implement
-authid changes, kernel patches, kstuff integration, forced unloads, package
-installers, or DRM-related behavior. Those are outside the compatibility goal
-for the standalone file manager.
+Working payloads depend on a system authid before AppInst init can succeed on
+newer firmware. BFpilot implements that only in the isolated launcher installer.
+The stable file manager does not change authid and does not import launcher
+services.
 
 ## Boot Marker
 
@@ -185,8 +187,7 @@ It fails if `bfpilot.elf` or `bfpilot-debug.elf` contain:
 - `app_installer`
 - `BFPL00001`
 
-The only payloads allowed to directly import AppInstUtil are
-`bfpilot-launcher-installer.elf` and
-`tests/installer_linkonly_appinst.elf`. The link-only test exists specifically
-to prove whether that loader/firmware rejects AppInstUtil-linked ELFs before
-`main()`.
+Only installer/probe payloads may directly import AppInstUtil. The release
+installer must additionally import `kernel_sys`, SystemService, and UserService.
+The link-only test intentionally proves that an incomplete AppInst-only
+composition can be rejected before `main()`.

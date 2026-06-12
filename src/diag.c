@@ -21,7 +21,6 @@
 #define BFPILOT_HOMEBREW_DIR "/data/homebrew"
 #define BFPILOT_LOG_PATH "/data/BFpilot/log.txt"
 #define BFPILOT_CRASH_LOG_PATH "/data/BFpilot/crash.log"
-#define BFPILOT_USER_APP_ROOT "/user/app"
 #define BFPILOT_EXT0_ROOT "/mnt/ext0"
 #define BFPILOT_EXT0_HOMEBREW "/mnt/ext0/homebrew"
 
@@ -386,24 +385,6 @@ probe_opendir(const char *path) {
 }
 
 
-static int
-probe_write_file(const char *path) {
-  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-  if(fd < 0) {
-    bfpilot_diag_set_last_errno(errno);
-    return 0;
-  }
-  ssize_t wr = write(fd, "x", 1);
-  int close_rc = close(fd);
-  unlink(path);
-  if(wr != 1 || close_rc != 0) {
-    bfpilot_diag_set_last_errno(errno ? errno : EIO);
-    return 0;
-  }
-  return 1;
-}
-
-
 int
 bfpilot_diag_can_stat_root(void) {
   return probe_stat("/");
@@ -456,12 +437,11 @@ bfpilot_diag_can_opendir_ext0_homebrew(void) {
 
 int
 bfpilot_diag_can_write_data_bfpilot(void) {
-  ensure_diag_dir();
-  return probe_write_file(BFPILOT_DATA_DIR "/.write_probe");
+  return -1;
 }
 
 
 int
 bfpilot_diag_can_write_user_app(void) {
-  return probe_write_file(BFPILOT_USER_APP_ROOT "/.bfpilot_write_probe");
+  return -1;
 }

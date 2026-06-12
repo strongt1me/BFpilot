@@ -58,7 +58,7 @@ check_no_direct_appinst_import() {
   local needed
   needed="$(needed_libraries "${file}" || true)"
   if printf '%s\n' "${needed}" |
-     grep -E 'libSceAppInstUtil\.sprx|libSceSystemService\.sprx|libSceUserService\.sprx' >/dev/null; then
+     grep -E 'libSceAppInstUtil\.sprx|libSceSystemService\.sprx|libSceUserService\.sprx|libkernel_sys\.sprx' >/dev/null; then
     echo
     echo "inspect-imports: unsafe direct launcher import in ${file}" >&2
     printf '%s\n' "${needed}" >&2
@@ -89,7 +89,7 @@ for file in "$@"; do
 
   echo "-- undefined symbols --"
   if [[ -n "${READELF}" ]]; then
-    "${READELF}" --dyn-symbols "${file}" | grep -E 'UND|Undefined' || true
+    "${READELF}" --dyn-syms "${file}" | grep -E 'UND|Undefined' || true
   elif [[ -n "${NM}" ]]; then
     "${NM}" -u "${file}" || true
   else
@@ -106,6 +106,9 @@ for file in "$@"; do
       continue
       ;;
     tests/installer_linkonly_appinst.elf|./tests/installer_linkonly_appinst.elf)
+      continue
+      ;;
+    tests/installer_websrv_pattern.elf|./tests/installer_websrv_pattern.elf)
       continue
       ;;
   esac
@@ -137,12 +140,15 @@ if [[ -f tests/installer_linkonly_appinst.elf ]]; then
 fi
 
 if [[ -f bfpilot-launcher-installer.elf ]]; then
-  if ! needed_libraries bfpilot-launcher-installer.elf |
-       grep -q 'libSceAppInstUtil\.sprx'; then
-    echo
-    echo "inspect-imports: bfpilot-launcher-installer.elf must directly import libSceAppInstUtil.sprx" >&2
-    exit 1
-  fi
+  installer_needed="$(needed_libraries bfpilot-launcher-installer.elf || true)"
+  for required in libkernel_sys.sprx libSceSystemService.sprx \
+                  libSceUserService.sprx libSceAppInstUtil.sprx; do
+    if ! printf '%s\n' "${installer_needed}" | grep -q "${required}"; then
+      echo
+      echo "inspect-imports: bfpilot-launcher-installer.elf missing ${required}" >&2
+      exit 1
+    fi
+  done
 fi
 
 echo

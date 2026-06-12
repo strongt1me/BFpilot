@@ -3,10 +3,12 @@
 SHELL := bash
 
 ifeq ($(strip $(PS5_PAYLOAD_SDK)),)
+ifneq ($(filter ps5-diag,$(MAKECMDGOALS)),ps5-diag)
 $(error PS5_PAYLOAD_SDK is required, e.g. export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk)
 endif
-
+else
 include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+endif
 
 HOST_UNAME := $(shell uname -s 2>/dev/null || echo unknown)
 HOST_IS_WINDOWS := 0
@@ -39,6 +41,8 @@ HELLO_NOTIFY_BIN := tests/hello_notify.elf
 INSTALLER_ENTER_PROBE_BIN := tests/installer_enter_probe.elf
 INSTALLER_LINKONLY_APPINST_BIN := tests/installer_linkonly_appinst.elf
 INSTALLER_RUNTIME_RESOLVE_APPINST_BIN := tests/installer_runtime_resolve_appinst.elf
+INSTALLER_SYSMODULE_APPINST_BIN := tests/installer_sysmodule_appinst.elf
+INSTALLER_WEBSRV_PATTERN_BIN := tests/installer_websrv_pattern.elf
 
 WEB_SRCS := src/lite_main.c
 WEB_SRCS += src/boot_marker.c
@@ -75,6 +79,12 @@ INSTALLER_LINKONLY_APPINST_SRCS += src/notify.c
 INSTALLER_RUNTIME_RESOLVE_APPINST_SRCS := tests/installer_runtime_resolve_appinst.c
 INSTALLER_RUNTIME_RESOLVE_APPINST_SRCS += src/boot_marker.c
 INSTALLER_RUNTIME_RESOLVE_APPINST_SRCS += src/notify.c
+INSTALLER_SYSMODULE_APPINST_SRCS := tests/installer_sysmodule_appinst.c
+INSTALLER_SYSMODULE_APPINST_SRCS += src/boot_marker.c
+INSTALLER_SYSMODULE_APPINST_SRCS += src/notify.c
+INSTALLER_WEBSRV_PATTERN_SRCS := tests/installer_websrv_pattern.c
+INSTALLER_WEBSRV_PATTERN_SRCS += src/boot_marker.c
+INSTALLER_WEBSRV_PATTERN_SRCS += src/notify.c
 
 ASSETS := $(wildcard assets/*)
 GEN_SRCS := $(patsubst assets/%,gen/assets/%,$(ASSETS:=.c))
@@ -91,6 +101,8 @@ HELLO_NOTIFY_OBJS := $(patsubst %.c,build/hello-notify/%.o,$(HELLO_NOTIFY_SRCS))
 INSTALLER_ENTER_PROBE_OBJS := $(patsubst %.c,build/installer-enter-probe/%.o,$(INSTALLER_ENTER_PROBE_SRCS))
 INSTALLER_LINKONLY_APPINST_OBJS := $(patsubst %.c,build/installer-linkonly-appinst/%.o,$(INSTALLER_LINKONLY_APPINST_SRCS))
 INSTALLER_RUNTIME_RESOLVE_APPINST_OBJS := $(patsubst %.c,build/installer-runtime-resolve-appinst/%.o,$(INSTALLER_RUNTIME_RESOLVE_APPINST_SRCS))
+INSTALLER_SYSMODULE_APPINST_OBJS := $(patsubst %.c,build/installer-sysmodule-appinst/%.o,$(INSTALLER_SYSMODULE_APPINST_SRCS))
+INSTALLER_WEBSRV_PATTERN_OBJS := $(patsubst %.c,build/installer-websrv-pattern/%.o,$(INSTALLER_WEBSRV_PATTERN_SRCS))
 
 COMMON_CFLAGS := -Os -Wall -Werror -Isrc
 COMMON_CFLAGS += -ffunction-sections -fdata-sections -flto
@@ -151,6 +163,8 @@ INSTALLER_RUNTIME_RESOLVE_APPINST_CFLAGS += -DBFPILOT_BUILD_MODE=\"installer-run
 
 COMMON_LDFLAGS := -Wl,--gc-sections -flto
 APPINST_LDLIBS := -lSceAppInstUtil
+PRIVILEGED_APPINST_LDLIBS := -lkernel_sys -lSceSystemService
+PRIVILEGED_APPINST_LDLIBS += -lSceUserService -lSceAppInstUtil
 
 CC_CMD := "$(CC)"
 STRIP_CMD := "$(STRIP)"
@@ -174,7 +188,10 @@ WINDOWS_BASE_SUFFIX += -l:crtend.o -l:crtn.o
 WINDOWS_WEB_SUFFIX := -lkernel_web -lSceLibcInternal -lSceNet
 WINDOWS_WEB_SUFFIX += -lc_stub_weak -lkernel_stub_weak
 WINDOWS_WEB_SUFFIX += -l:crtend.o -l:crtn.o
-WINDOWS_APPINST_SUFFIX := -lSceAppInstUtil $(WINDOWS_BASE_SUFFIX)
+WINDOWS_APPINST_SUFFIX := -lkernel_sys -lSceSystemService
+WINDOWS_APPINST_SUFFIX += -lSceUserService -lSceAppInstUtil
+WINDOWS_APPINST_SUFFIX += -lSceLibcInternal -lc_stub_weak -lkernel_stub_weak
+WINDOWS_APPINST_SUFFIX += -l:crtend.o -l:crtn.o
 define run
 bash -lc '$(RUN_ENV) && $(1)'
 endef
@@ -184,7 +201,7 @@ $(1)
 endef
 endif
 
-all: bfpilot debug full launcher-installer launcher-installer-safe hello-boot hello-http hello-notify installer-enter-probe installer-linkonly-appinst installer-runtime-resolve-appinst
+all: bfpilot debug full launcher-installer launcher-installer-safe hello-boot hello-http hello-notify installer-enter-probe installer-linkonly-appinst installer-runtime-resolve-appinst installer-websrv-pattern
 
 bfpilot: $(BFPILOT_BIN)
 
@@ -209,6 +226,10 @@ installer-enter-probe: $(INSTALLER_ENTER_PROBE_BIN)
 installer-linkonly-appinst: $(INSTALLER_LINKONLY_APPINST_BIN)
 
 installer-runtime-resolve-appinst: $(INSTALLER_RUNTIME_RESOLVE_APPINST_BIN)
+
+installer-sysmodule-appinst: $(INSTALLER_SYSMODULE_APPINST_BIN)
+
+installer-websrv-pattern: $(INSTALLER_WEBSRV_PATTERN_BIN)
 
 gen/assets:
 	$(call run,mkdir -p $@)
@@ -260,6 +281,14 @@ build/installer-runtime-resolve-appinst/%.o: %.c Makefile
 	$(call run,mkdir -p $(dir $@))
 	$(call run,$(CC_CMD) $(INSTALLER_RUNTIME_RESOLVE_APPINST_CFLAGS) -c $< -o $@)
 
+build/installer-sysmodule-appinst/%.o: %.c Makefile
+	$(call run,mkdir -p $(dir $@))
+	$(call run,$(CC_CMD) $(INSTALLER_RUNTIME_RESOLVE_APPINST_CFLAGS) -c $< -o $@)
+
+build/installer-websrv-pattern/%.o: %.c Makefile
+	$(call run,mkdir -p $(dir $@))
+	$(call run,$(CC_CMD) $(INSTALLER_RUNTIME_RESOLVE_APPINST_CFLAGS) -c $< -o $@)
+
 ifeq ($(HOST_IS_WINDOWS),1)
 $(BFPILOT_BIN): $(BFPILOT_OBJS)
 	$(call run,$(LD_CMD) -o $@ $(WINDOWS_LINK_PREFIX) $(BFPILOT_OBJS) $(WINDOWS_WEB_SUFFIX))
@@ -306,6 +335,10 @@ $(INSTALLER_LINKONLY_APPINST_BIN): $(INSTALLER_LINKONLY_APPINST_OBJS)
 $(INSTALLER_RUNTIME_RESOLVE_APPINST_BIN): $(INSTALLER_RUNTIME_RESOLVE_APPINST_OBJS)
 	$(call run,$(LD_CMD) -o $@ $(WINDOWS_LINK_PREFIX) $(INSTALLER_RUNTIME_RESOLVE_APPINST_OBJS) $(WINDOWS_BASE_SUFFIX))
 	$(call run,$(STRIP_CMD) --strip-all $@)
+
+$(INSTALLER_WEBSRV_PATTERN_BIN): $(INSTALLER_WEBSRV_PATTERN_OBJS)
+	$(call run,$(LD_CMD) -o $@ $(WINDOWS_LINK_PREFIX) $(INSTALLER_WEBSRV_PATTERN_OBJS) $(WINDOWS_APPINST_SUFFIX))
+	$(call run,$(STRIP_CMD) --strip-all $@)
 else
 $(BFPILOT_BIN): $(BFPILOT_OBJS)
 	$(call run,$(CC_CMD) $(BFPILOT_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(BFPILOT_OBJS))
@@ -322,7 +355,7 @@ $(FULL_BIN): $(LEGACY_FULL_OBJS) $(APP_ASSETS)
 	$(call run,$(STRIP_CMD) --strip-all $@)
 
 $(LAUNCHER_INSTALLER_BIN): $(LAUNCHER_INSTALLER_OBJS) $(APP_ASSETS)
-	$(call run,$(CC_CMD) $(LAUNCHER_INSTALLER_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(LAUNCHER_INSTALLER_OBJS) $(APPINST_LDLIBS))
+	$(call run,$(CC_CMD) $(LAUNCHER_INSTALLER_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(LAUNCHER_INSTALLER_OBJS) $(PRIVILEGED_APPINST_LDLIBS))
 	$(call run,$(STRIP_CMD) --strip-all $@)
 
 $(SAFE_LAUNCHER_INSTALLER_BIN): $(SAFE_LAUNCHER_INSTALLER_OBJS) $(APP_ASSETS)
@@ -352,10 +385,18 @@ $(INSTALLER_LINKONLY_APPINST_BIN): $(INSTALLER_LINKONLY_APPINST_OBJS)
 $(INSTALLER_RUNTIME_RESOLVE_APPINST_BIN): $(INSTALLER_RUNTIME_RESOLVE_APPINST_OBJS)
 	$(call run,$(CC_CMD) $(INSTALLER_RUNTIME_RESOLVE_APPINST_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(INSTALLER_RUNTIME_RESOLVE_APPINST_OBJS))
 	$(call run,$(STRIP_CMD) --strip-all $@)
+
+$(INSTALLER_SYSMODULE_APPINST_BIN): $(INSTALLER_SYSMODULE_APPINST_OBJS)
+	$(call run,$(CC_CMD) $(INSTALLER_RUNTIME_RESOLVE_APPINST_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(INSTALLER_SYSMODULE_APPINST_OBJS) -lSceSysmodule)
+	$(call run,$(STRIP_CMD) --strip-all $@)
+
+$(INSTALLER_WEBSRV_PATTERN_BIN): $(INSTALLER_WEBSRV_PATTERN_OBJS)
+	$(call run,$(CC_CMD) $(INSTALLER_RUNTIME_RESOLVE_APPINST_CFLAGS) $(COMMON_LDFLAGS) -o $@ $(INSTALLER_WEBSRV_PATTERN_OBJS) -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil)
+	$(call run,$(STRIP_CMD) --strip-all $@)
 endif
 
 inspect-imports: all
-	$(call run,bash scripts/inspect_imports.sh $(BFPILOT_BIN) $(DEBUG_BIN) $(FULL_BIN) $(LAUNCHER_INSTALLER_BIN) $(SAFE_LAUNCHER_INSTALLER_BIN) $(HELLO_BOOT_BIN) $(HELLO_HTTP_BIN) $(HELLO_NOTIFY_BIN) $(INSTALLER_ENTER_PROBE_BIN) $(INSTALLER_LINKONLY_APPINST_BIN) $(INSTALLER_RUNTIME_RESOLVE_APPINST_BIN))
+	$(call run,bash scripts/inspect_imports.sh $(BFPILOT_BIN) $(DEBUG_BIN) $(FULL_BIN) $(LAUNCHER_INSTALLER_BIN) $(SAFE_LAUNCHER_INSTALLER_BIN) $(HELLO_BOOT_BIN) $(HELLO_HTTP_BIN) $(HELLO_NOTIFY_BIN) $(INSTALLER_ENTER_PROBE_BIN) $(INSTALLER_LINKONLY_APPINST_BIN) $(INSTALLER_RUNTIME_RESOLVE_APPINST_BIN) $(INSTALLER_WEBSRV_PATTERN_BIN))
 
 deploy-bfpilot: bfpilot
 	$(call run,$(DEPLOY_CMD) -h $(PS5_HOST) -p $(PS5_PORT) $(BFPILOT_BIN))
@@ -369,8 +410,11 @@ deploy-full: full
 deploy-launcher-installer: launcher-installer
 	$(call run,$(DEPLOY_CMD) -h $(PS5_HOST) -p $(PS5_PORT) $(LAUNCHER_INSTALLER_BIN))
 
+ps5-diag:
+	$(call run,$(PYTHON) scripts/ps5_diag.py)
+
 clean:
-	$(call run,rm -rf $(BFPILOT_BIN) $(DEBUG_BIN) $(FULL_BIN) bfpilot-full-legacy.elf $(LAUNCHER_INSTALLER_BIN) $(SAFE_LAUNCHER_INSTALLER_BIN) bfpilot-core.elf build gen $(HELLO_BOOT_BIN) $(HELLO_HTTP_BIN) $(HELLO_NOTIFY_BIN) $(INSTALLER_ENTER_PROBE_BIN) $(INSTALLER_LINKONLY_APPINST_BIN) $(INSTALLER_RUNTIME_RESOLVE_APPINST_BIN) tests/hello_appinst.elf)
+	$(call run,rm -rf $(BFPILOT_BIN) $(DEBUG_BIN) $(FULL_BIN) bfpilot-full-legacy.elf $(LAUNCHER_INSTALLER_BIN) $(SAFE_LAUNCHER_INSTALLER_BIN) bfpilot-core.elf build gen $(HELLO_BOOT_BIN) $(HELLO_HTTP_BIN) $(HELLO_NOTIFY_BIN) $(INSTALLER_ENTER_PROBE_BIN) $(INSTALLER_LINKONLY_APPINST_BIN) $(INSTALLER_RUNTIME_RESOLVE_APPINST_BIN) $(INSTALLER_SYSMODULE_APPINST_BIN) $(INSTALLER_WEBSRV_PATTERN_BIN) tests/hello_appinst.elf)
 
 .SECONDARY: $(GEN_SRCS)
-.PHONY: all bfpilot debug full legacy-full launcher-installer launcher-installer-safe hello-boot hello-http hello-notify installer-enter-probe installer-linkonly-appinst installer-runtime-resolve-appinst inspect-imports clean deploy-bfpilot deploy-debug deploy-full deploy-launcher-installer
+.PHONY: all bfpilot debug full legacy-full launcher-installer launcher-installer-safe hello-boot hello-http hello-notify installer-enter-probe installer-linkonly-appinst installer-runtime-resolve-appinst installer-sysmodule-appinst installer-websrv-pattern inspect-imports clean deploy-bfpilot deploy-debug deploy-full deploy-launcher-installer ps5-diag

@@ -1,212 +1,177 @@
 # BFpilot Firmware Testing
 
-Use this protocol on every firmware/loader combination. Test the file manager
-first. Test launcher/AppInstUtil only after the file manager works.
+Use this order on every firmware/loader combination. Do not skip ahead to the
+launcher. Record the exact payload, endpoint, HTTP status/return code, expected
+marker, actual result, and relevant source subsystem.
 
-Record:
+Remote diagnostics are read-only. Remote write tests require:
 
-- Firmware version.
-- Exploit/loader name and version.
-- Payload name.
-- Whether `/data/BFpilot/boot.log` received a new entry.
-- Whether a notification appeared.
-- Whether the HTTP server started.
-- `/api/status` and `/api/diag` output when reachable.
-- Relevant log files under `/data/BFpilot`.
+```sh
+export BF_ALLOW_PS5_WRITE=1
+export BF_ALLOWED_REMOTE_ROOTS=/data/BFpilot/bench
+```
 
-## Stage A: Main File Manager
+Never delete remote benchmark artifacts during diagnostics. They have unique
+timestamped BFpilot-owned names and can be reviewed before any later cleanup.
 
-1. Send `bfpilot.elf` to the loader on port `9021`.
-2. Verify `BFpilot BOOT` notification if notifications are working.
-3. Verify `/data/BFpilot/boot.log` has a new `bfpilot file-manager` entry.
-4. Open `http://PS5_IP:5905/`.
-5. Open `http://PS5_IP:5905/api/status`.
-6. Open `http://PS5_IP:5905/api/diag`.
-7. Browse `/data`.
-8. Browse `/mnt/usb0` if an external drive is connected.
-9. Upload a small text file to `/data/BFpilot-test`.
-10. Copy, move, and delete that test file.
-11. Save `/data/BFpilot/log.txt`.
+## 1. Build Locally
 
-Pass criteria:
+```sh
+export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
+make clean all
+make inspect-imports
+```
 
-- Boot marker appears.
-- Server starts on port `5905`.
-- `/`, `/api/status`, `/api/diag`, `/fs`, and `/api/fs/*` are reachable.
-- Basic file operations work in `/data/BFpilot-test`.
+Expected: all ELFs build; import inspection reports compatibility checks passed.
 
-## Stage B: Debug File Manager
+Failure meaning: source/toolchain/import boundary failure. Do not inject.
 
-Use this when Stage A appears to do nothing or when testing a new loader.
+## 2. Stable File Manager
 
-1. Send `bfpilot-debug.elf` to the loader on port `9021`.
-2. Verify `/data/BFpilot/boot.log` has a new `bfpilot-debug debug` entry.
-3. Open `http://PS5_IP:5905/api/status`.
-4. Open `http://PS5_IP:5905/api/diag`.
-5. Save `/data/BFpilot/log.txt`.
+```sh
+python3 payload_sender.py "$PS5_IP" "${BF_PAYLOAD_PORT:-9021}" bfpilot.elf
+PS5_IP="$PS5_IP" BF_WEB_PORT="${BF_WEB_PORT:-5905}" make ps5-diag
+```
 
-Expected result:
+Expected notification/log: `BFpilot BOOT`; a new `bfpilot file-manager` line in
+`/data/BFpilot/boot.log`; server startup lines in `/data/BFpilot/log.txt`.
 
-- If `boot.log` has no new entry, the payload likely failed before `main()` or
-  the loader rejected it.
-- If `boot.log` has an entry but `/api/status` is unreachable, the failure is
-  after `main()` and before or during server startup.
+Expected endpoints: `/api/status` and `/api/diag` return HTTP 200;
+`/api/status` reports `mode=file-manager`, `port=5905`, and
+`diagReadOnly=true`.
 
-## Stage C: Alternate Port
+Failure meaning:
 
-Use this when another BFpilot instance may already be running on `5905`.
+- No boot marker: loader rejected the ELF or failure occurred before `main()`.
+- Boot marker but no status: failure after `main()` during startup/bind/listen.
+- Status works but diagnostics fail: diagnostic route defect.
 
-1. Send `bfpilot-debug.elf --port 5906` to the loader.
-2. Open `http://PS5_IP:5906/api/status`.
-3. Open `http://PS5_IP:5906/api/diag`.
-4. Save `/data/BFpilot/log.txt`.
+Next action: inject the debug payload only if this stage fails.
 
-Pass criteria:
+## 3. Debug File Manager
 
-- The new payload can start on `5906` without touching the old server on `5905`.
+```sh
+python3 payload_sender.py "$PS5_IP" "${BF_PAYLOAD_PORT:-9021}" bfpilot-debug.elf
+PS5_IP="$PS5_IP" BF_WEB_PORT="${BF_WEB_PORT:-5905}" make ps5-diag
+```
 
-## Stage D: Reinjection
+Expected: `bfpilot-debug debug` boot marker and stronger startup notifications.
 
-1. Start `bfpilot.elf`.
-2. Reinject `bfpilot.elf` while idle.
-3. Verify notification `BFpilot reload: old server detected`.
-4. Verify the old listener stops cleanly and the new server starts.
-5. Start a large copy or move.
-6. Reinject `bfpilot.elf` during the active job.
-7. Verify notification `BFpilot reload blocked`.
-8. Verify the old job is not killed.
-9. Save `/data/BFpilot/log.txt`.
+Failure meaning: use `/data/BFpilot/boot.log`, `/data/BFpilot/log.txt`, and
+`/data/BFpilot/crash.log` to locate the last checkpoint.
 
-Pass criteria:
+## 4. Safe Transfer Benchmark
 
-- Idle reinjection performs a clean handoff.
-- Active file jobs are not interrupted.
-- Reload exits are logged and notified instead of appearing silent.
+Run only after the stable file manager passes and writes are explicitly
+authorized:
 
-## Stage E: Launcher Installer
+```sh
+PS5_IP="$PS5_IP" BF_WEB_PORT="${BF_WEB_PORT:-5905}" \
+BF_ALLOW_PS5_WRITE=1 \
+BF_ALLOWED_REMOTE_ROOTS=/data/BFpilot/bench \
+python3 scripts/ps5_diag.py --bench
+```
 
-Only run this after Stage A passes on the same firmware/loader.
+Expected files: unique timestamped source/copy folders only under
+`/data/BFpilot/bench`.
 
-### Integrated Full Build
+Expected results: upload response contains `elapsedMs`, `averageMBps`, and
+`destinationDev`; copy job contains bytes read/written, elapsed ms, MB/s,
+source/destination device IDs, and errno.
 
-This is the first installer-capable build to try on firmware 11.6, because it
-preserves the 0.2.0-style launcher flow that already installed there.
+Failure meaning:
 
-1. Send `bfpilot-full.elf` to the loader on port `9021`.
-2. Watch for `BFpilot BOOT`, `BFpilot app`, and `BFpilot started`
-   notifications.
-3. Open `http://PS5_IP:5905/`.
-4. Save `/data/BFpilot/log.txt`.
-5. Open `http://PS5_IP:5905/api/diag` if the web server starts.
-6. Check whether the BFpilot tile appears or refreshes.
+- Slow client upload and slow server upload metric: network/browser/receive or
+  storage path.
+- Fast server upload metric but slow client elapsed time: browser/network.
+- Slow same-device copy: copy/storage path.
+- Slow only when device IDs differ: USB/cross-filesystem path.
 
-Pass criteria:
+Next action: save the generated diagnostics JSON. Do not benchmark user files.
 
-- On firmware where AppInstUtil runtime resolution works, the tile installs or
-  refreshes.
-- If launcher install fails, the web server still starts and logs the exact
-  AppInst resolution/init/install return codes.
+## 5. Launcher Diagnostic Order
 
-### Isolated Direct Installer
+Only continue after stages 1-4 are stable.
 
-Use this after Stage A if you want to test the direct AppInst import pattern
-used by websrv/Payload Manager/ftpsrv. It may fail before `main()` if the loader
-rejects AppInstUtil imports.
+### 5.1 Safe Installer
 
-1. Send `bfpilot-launcher-installer.elf` to the loader on port `9021`.
-2. Watch for `BFpilot BOOT` and launcher installer notifications.
-3. Check whether the BFpilot tile appears or refreshes.
-4. Save `/data/BFpilot/launcher-installer.log`.
-5. Save `/data/BFpilot/boot.log`.
+Inject `bfpilot-launcher-installer-safe.elf`.
 
-Launcher installer fields to record from the log:
+Expected: boot marker and `/data/BFpilot/launcher-installer.log`.
 
-- `entered main`.
-- `AppInst init return code`.
-- `/user/app/BFPL00001` mkdir return code.
-- `param.json` and `icon0.png` write return code.
-- `AppInstallTitleDir resolved`.
-- `AppInstallTitleDir return code`.
-- `AppInstallAll fallback return code`.
-- `final result`.
+Failure meaning: no marker means failure before `main()` unrelated to direct
+AppInst import. A log showing AppInstUtil unavailable means runtime resolution
+cannot install on this environment.
 
-Pass criteria:
+### 5.2 Entry Probe
 
-- Launcher install may succeed or fail.
-- Launcher failure does not affect `bfpilot.elf`.
-- File manager remains testable through `http://PS5_IP:5905/`.
+Inject `tests/installer_enter_probe.elf`.
 
-If the direct installer gives no notification and no log:
+Expected file: `/data/BFpilot/installer_enter_probe.txt`.
 
-1. Send `bfpilot-launcher-installer-safe.elf`.
-2. Save `/data/BFpilot/launcher-installer.log`.
-3. If the safe installer reaches `main()` but logs
-   `kernel_dynlib_handle libSceAppInstUtil.sprx rc=0xffffffff`, AppInstUtil is
-   not available through the safe runtime path.
-4. If `tests/installer_linkonly_appinst.elf` also produces no marker, direct
-   AppInst imports fail before `main()` on that loader/firmware.
+Failure meaning: loader rejected even the safe installer-shaped probe.
 
-In that case the direct installer is being rejected before it can run, while
-the main file manager remains usable through `http://PS5_IP:5905/`.
+### 5.3 Direct Import Probe
 
-## Stage F: Minimal Probe Payloads
+Inject `tests/installer_linkonly_appinst.elf`.
 
-Use these to isolate loader, notification, HTTP, and AppInstUtil behavior.
+Expected file: `/data/BFpilot/linkonly_appinst_entered.txt`.
 
-### `tests/hello_boot.elf`
+Failure meaning: absent marker after the entry probe passed means direct
+AppInstUtil imports were rejected before `main()`.
 
-1. Send `tests/hello_boot.elf`.
-2. Verify boot marker notification.
-3. Verify `/data/BFpilot/boot.log`.
-4. Wait 10 seconds for `BFpilot BOOT still alive`.
+### 5.4 Runtime Resolve Probe
 
-### `tests/hello_http.elf`
+Inject `tests/installer_runtime_resolve_appinst.elf`.
 
-1. Send `tests/hello_http.elf`.
-2. Open `http://PS5_IP:5906/api/status`.
+Expected files: `/data/BFpilot/runtime_resolve_entered.txt` and
+`/data/BFpilot/runtime_resolve_appinst.log`.
 
-### `tests/hello_notify.elf`
+Failure meaning: `kernel_dynlib_handle ... rc=0xffffffff` means AppInstUtil is
+not reachable through the safe runtime path.
 
-1. Send `tests/hello_notify.elf`.
-2. Record notification result from sender output and `/data/BFpilot/boot.log`.
+### 5.5 Exact Websrv-Pattern Probe
 
-### `tests/installer_enter_probe.elf`
+Build and inject `tests/installer_websrv_pattern.elf`:
 
-1. Send `tests/installer_enter_probe.elf`.
-2. Verify `/data/BFpilot/installer_enter_probe.txt` exists.
-3. If it does not exist, the loader rejected even the safe installer-shaped
-   probe before `main()`.
+```sh
+make installer-websrv-pattern
+python3 payload_sender.py "$PS5_IP" "${BF_PAYLOAD_PORT:-9021}" \
+  tests/installer_websrv_pattern.elf
+```
 
-### `tests/installer_linkonly_appinst.elf`
+Expected files: `/data/BFpilot/websrv_pattern_entered.txt` and
+`/data/BFpilot/websrv_pattern.log`. Expected return codes for UserService init,
+authid setup, and AppInst init are all zero.
 
-1. Send `tests/installer_linkonly_appinst.elf`.
-2. Verify `/data/BFpilot/linkonly_appinst_entered.txt` exists.
-3. If it does not exist, direct AppInstUtil linking is incompatible with that
-   loader/firmware and installer code must avoid direct AppInst imports.
+Failure meaning: the loader/firmware does not support the complete dependency
+and privilege composition used by the isolated installer. Do not attempt tile
+registration.
 
-### `tests/installer_runtime_resolve_appinst.elf`
+### 5.6 Isolated Installer
 
-1. Send `tests/installer_runtime_resolve_appinst.elf`.
-2. Verify `/data/BFpilot/runtime_resolve_entered.txt` exists.
-3. Save `/data/BFpilot/runtime_resolve_appinst.log`.
-4. Use the log to see whether `kernel_dynlib_handle`, symbol lookup, and NID
-   resolve reached AppInstUtil.
+Inject `bfpilot-launcher-installer.elf` only when the websrv-pattern probe
+passes.
 
-Interpretation:
+Expected: boot marker, launcher log, metadata line showing title
+`BFPL00001` and `http://127.0.0.1:5905/`, asset validation, AppInst init code,
+staging codes, install code, and final result.
 
-- `kernel_dynlib_handle ... rc=0xffffffff` means AppInstUtil is not already
-  loaded in this process.
-- BFpilot intentionally skips `dlopen` for AppInstUtil after a prior test stops
-  before the `dlopen` result log, because that path is not safe enough for a
-  compatibility payload.
+Failure meaning:
 
-## Compatibility Table
+- No boot marker: the complete direct-import set was rejected before `main()`.
+- Init failed: AppInstUtil present but unusable in the current context.
+- Authid setup failed: `kernel_sys` privilege operation unavailable.
+- Asset/staging failed: path permissions or invalid/missing assets.
+- Registration failed: AppInst install call rejected metadata/title directory.
+- Installed but wrong URL: compare staged `param.json` with the logged deep link.
 
-| firmware | exploit/loader | payload used | boot marker | server starts | file browse | upload | copy | move | delete | launcher install | notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 12.70 |  | bfpilot.elf |  |  |  |  |  |  |  | n/a |  |
-| 12.70 |  | bfpilot-full.elf |  |  |  |  |  |  |  |  |  |
-| 12.70 |  | bfpilot-launcher-installer.elf |  | n/a | n/a | n/a | n/a | n/a | n/a |  |  |
-| 11.60 |  | bfpilot.elf |  |  |  |  |  |  |  | n/a |  |
-| 11.60 |  | bfpilot-full.elf |  |  |  |  |  |  |  |  |  |
-| 11.60 |  | bfpilot-launcher-installer.elf |  | n/a | n/a | n/a | n/a | n/a | n/a |  |  |
+### 5.7 Experimental Full Build
+
+Inject `bfpilot-full.elf` last.
+
+Expected: launcher diagnostics plus a functioning web server even if launcher
+registration fails.
+
+Failure meaning: integrated dynamic path is incompatible with the environment.
+Continue using `bfpilot.elf`; do not merge installer imports into it.

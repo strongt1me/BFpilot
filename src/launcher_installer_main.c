@@ -18,6 +18,7 @@
 
 #include "boot_marker.h"
 #include "notify.h"
+#include "sce_resolve.h"
 #include "version.h"
 
 #define BFPILOT_APP_TITLE_ID "BFPL00001"
@@ -138,7 +139,14 @@ main(void) {
   const char *final_state = "unsupported";
 
   installer_log("entered main tag=%s build=%s", VERSION_TAG, BUILD_VERSION);
-
+  installer_log("launcher metadata title_id=%s deeplink=http://127.0.0.1:5905/ "
+                "param_bytes=%lu icon_bytes=%lu icon_png_magic=%s",
+                BFPILOT_APP_TITLE_ID, (unsigned long)bfpilot_param_json_size,
+                (unsigned long)bfpilot_icon0_png_size,
+                bfpilot_icon0_png_size >= 8 &&
+                bfpilot_icon0_png[0] == 0x89 && bfpilot_icon0_png[1] == 'P' &&
+                bfpilot_icon0_png[2] == 'N' && bfpilot_icon0_png[3] == 'G'
+                    ? "yes" : "no");
   installer_log("about to kernel_dynlib_handle %s", BFPILOT_APPINST_MODULE);
   appinst_handle_rc = kernel_dynlib_handle(-1, BFPILOT_APPINST_MODULE,
                                            &appinst_handle);

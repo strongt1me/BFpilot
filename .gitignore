@@ -4,6 +4,8 @@ gen/
 *.a
 *.so
 *.elf
+__pycache__/
+diagnostics/*.json
 
 # Local environment / editor noise
 .env

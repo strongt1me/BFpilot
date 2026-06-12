@@ -24,8 +24,12 @@
 #include "websrv.h"
 
 
-#define COPY_BUF_SIZE   (256 * 1024)
-#define UPLOAD_BUF_SIZE (256 * 1024)
+#ifndef BFPILOT_TRANSFER_BUF_SIZE
+#define BFPILOT_TRANSFER_BUF_SIZE (1024 * 1024)
+#endif
+
+#define COPY_BUF_SIZE   BFPILOT_TRANSFER_BUF_SIZE
+#define UPLOAD_BUF_SIZE BFPILOT_TRANSFER_BUF_SIZE
 
 
 typedef struct json_buf {
@@ -192,17 +196,47 @@ struct job_state {
   atomic_int      total_files;
   atomic_int      done_files;
   atomic_int      failed_files;
+  atomic_long     elapsed_ms;
+  atomic_long     read_bytes;
+  atomic_long     written_bytes;
+  atomic_int      last_errno;
   char            current[512];
+  char            source[512];
+  char            destination[512];
   char            verb[16];
   char            error[256];
+  unsigned long   source_dev;
+  unsigned long   destination_dev;
   time_t          started_at;
   time_t          ended_at;
+  long            started_ms;
 };
 
 
 static struct job_state g_job = {
   .lock = PTHREAD_MUTEX_INITIALIZER,
 };
+
+struct upload_state {
+  pthread_mutex_t lock;
+  long            elapsed_ms;
+  unsigned long   bytes;
+  unsigned long   destination_dev;
+  int             error_code;
+  char            path[512];
+};
+
+static struct upload_state g_upload = {
+  .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+
+
+static long
+monotonic_ms(void) {
+  struct timespec ts;
+  if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+  return (long)ts.tv_sec * 1000L + (long)(ts.tv_nsec / 1000000L);
+}
 
 static void
 job_set_current(const char *path) {
@@ -242,11 +276,20 @@ job_begin(const char *verb) {
   atomic_store(&g_job.total_files, 0);
   atomic_store(&g_job.done_files, 0);
   atomic_store(&g_job.failed_files, 0);
+  atomic_store(&g_job.elapsed_ms, 0);
+  atomic_store(&g_job.read_bytes, 0);
+  atomic_store(&g_job.written_bytes, 0);
+  atomic_store(&g_job.last_errno, 0);
   g_job.current[0] = 0;
+  g_job.source[0] = 0;
+  g_job.destination[0] = 0;
   g_job.error[0] = 0;
+  g_job.source_dev = 0;
+  g_job.destination_dev = 0;
   snprintf(g_job.verb, sizeof(g_job.verb), "%s", verb);
   g_job.started_at = time(NULL);
   g_job.ended_at = 0;
+  g_job.started_ms = monotonic_ms();
   pthread_mutex_unlock(&g_job.lock);
   return 1;
 }
@@ -254,14 +297,28 @@ job_begin(const char *verb) {
 
 static void
 job_end(int rc, const char *err) {
+  int saved_errno = errno;
   pthread_mutex_lock(&g_job.lock);
   g_job.ended_at = time(NULL);
+  long ended_ms = monotonic_ms();
+  atomic_store(&g_job.elapsed_ms,
+               ended_ms > g_job.started_ms ? ended_ms - g_job.started_ms : 0);
+  atomic_store(&g_job.last_errno, rc == 0 ? 0 : saved_errno);
   if(rc != 0 && err && !g_job.error[0]) {
     snprintf(g_job.error, sizeof(g_job.error), "%s", err);
   }
   pthread_mutex_unlock(&g_job.lock);
-  bfpilot_log("transfer job end verb=%s rc=%d error=%s",
-              g_job.verb, rc, err ? err : "");
+  long elapsed_ms = atomic_load(&g_job.elapsed_ms);
+  long written = atomic_load(&g_job.written_bytes);
+  double mbps = elapsed_ms > 0 ?
+      ((double)written * 1000.0 / (double)elapsed_ms) / (1024.0 * 1024.0) : 0.0;
+  bfpilot_log("transfer job end verb=%s rc=%d errno=%d bytes_read=%ld "
+              "bytes_written=%ld elapsed_ms=%ld average_mbps=%.2f "
+              "src_dev=%lu dst_dev=%lu current=%s error=%s",
+              g_job.verb, rc, atomic_load(&g_job.last_errno),
+              atomic_load(&g_job.read_bytes), written, elapsed_ms, mbps,
+              g_job.source_dev, g_job.destination_dev, g_job.current,
+              err ? err : "");
   atomic_store(&g_job.busy, 0);
 }
 
@@ -330,6 +387,7 @@ copy_file(const char *src, const char *dst) {
       break;
     }
     if(r == 0) break;
+    atomic_fetch_add(&g_job.read_bytes, (long)r);
     char *p = buf;
     ssize_t left = r;
     while(left > 0) {
@@ -348,6 +406,7 @@ copy_file(const char *src, const char *dst) {
       p += w;
       left -= w;
       atomic_fetch_add(&g_job.copied_bytes, (long)w);
+      atomic_fetch_add(&g_job.written_bytes, (long)w);
     }
     if(rc != 0) break;
   }
@@ -359,10 +418,6 @@ copy_file(const char *src, const char *dst) {
 
   free(buf);
   close(in);
-  if(rc == 0 && fsync(out) != 0 && errno != EINVAL) {
-    job_set_error("sync(%s): %s", dst, strerror(errno));
-    rc = -1;
-  }
   if(close(out) != 0 && rc == 0) {
     job_set_error("close(%s): %s", dst, strerror(errno));
     rc = -1;
@@ -519,6 +574,11 @@ copy_worker(void *arg) {
     free(a);
     return NULL;
   }
+  pthread_mutex_lock(&g_job.lock);
+  snprintf(g_job.source, sizeof(g_job.source), "%s", a->src);
+  snprintf(g_job.destination, sizeof(g_job.destination), "%s", a->dst);
+  g_job.source_dev = (unsigned long)src_st.st_dev;
+  pthread_mutex_unlock(&g_job.lock);
 
   job_set_current("Scanning source");
   size_walker(a->src, &files, &bytes, 0);
@@ -551,6 +611,11 @@ copy_worker(void *arg) {
       free(a);
       return NULL;
     }
+  }
+  if(stat(a->dst, &dst_st) == 0) {
+    pthread_mutex_lock(&g_job.lock);
+    g_job.destination_dev = (unsigned long)dst_st.st_dev;
+    pthread_mutex_unlock(&g_job.lock);
   }
 
   const char *base = path_basename(a->src);
@@ -851,18 +916,6 @@ append_fs_place(json_buf_t *b, int *first, const char *path,
   struct stat st;
   if(stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
 
-  char probe[128];
-  int n = snprintf(probe, sizeof(probe), "%s/.bfpilot_probe", path);
-  int writable = 0;
-  if(n > 0 && (size_t)n < sizeof(probe)) {
-    int fd = open(probe, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if(fd >= 0) {
-      writable = 1;
-      close(fd);
-      unlink(probe);
-    }
-  }
-
   if(!*first && json_append(b, ",") != 0) return -1;
   *first = 0;
 
@@ -870,7 +923,7 @@ append_fs_place(json_buf_t *b, int *first, const char *path,
      json_string(b, path) != 0 ||
      json_append(b, ",\"kind\":") != 0 ||
      json_string(b, kind ? kind : "path") != 0 ||
-     json_appendf(b, ",\"writable\":%s}", writable ? "true" : "false") != 0) {
+     json_append(b, ",\"writable\":null,\"writeProbe\":\"skipped-read-only\"}") != 0) {
     return -1;
   }
   return 0;
@@ -1075,15 +1128,26 @@ status_handler(const http_request_t *req) {
   int tf = atomic_load(&g_job.total_files);
   int df = atomic_load(&g_job.done_files);
   int ff = atomic_load(&g_job.failed_files);
+  long elapsed_ms = atomic_load(&g_job.elapsed_ms);
+  long read_bytes = atomic_load(&g_job.read_bytes);
+  long written_bytes = atomic_load(&g_job.written_bytes);
+  int last_errno = atomic_load(&g_job.last_errno);
   int cancel = atomic_load(&g_job.cancel);
-  char verb[16], current[512], err[256];
+  char verb[16], current[512], source[512], destination[512], err[256];
+  unsigned long source_dev, destination_dev;
+  long started_ms;
   time_t started_at;
   time_t ended_at;
 
   pthread_mutex_lock(&g_job.lock);
   snprintf(verb, sizeof(verb), "%s", g_job.verb);
   snprintf(current, sizeof(current), "%s", g_job.current);
+  snprintf(source, sizeof(source), "%s", g_job.source);
+  snprintf(destination, sizeof(destination), "%s", g_job.destination);
   snprintf(err, sizeof(err), "%s", g_job.error);
+  source_dev = g_job.source_dev;
+  destination_dev = g_job.destination_dev;
+  started_ms = g_job.started_ms;
   started_at = g_job.started_at;
   ended_at = g_job.ended_at;
   pthread_mutex_unlock(&g_job.lock);
@@ -1097,6 +1161,10 @@ status_handler(const http_request_t *req) {
   long eta = busy && speed > 0 && tb > cb
                  ? (tb - cb + speed - 1) / speed
                  : 0;
+  if(busy) {
+    long now_ms = monotonic_ms();
+    elapsed_ms = now_ms > started_ms ? now_ms - started_ms : 0;
+  }
 
   json_buf_t b = {0};
   if(json_appendf(&b,
@@ -1107,14 +1175,53 @@ status_handler(const http_request_t *req) {
      json_string(&b, current) != 0 ||
      json_append(&b, ",\"error\":") != 0 ||
      json_string(&b, err) != 0 ||
+     json_append(&b, ",\"source\":") != 0 ||
+     json_string(&b, source) != 0 ||
+     json_append(&b, ",\"destination\":") != 0 ||
+     json_string(&b, destination) != 0 ||
      json_appendf(&b,
       ",\"totalBytes\":%ld,\"copiedBytes\":%ld,"
       "\"totalFiles\":%d,\"doneFiles\":%d,\"failedFiles\":%d,"
       "\"startedAt\":%ld,\"endedAt\":%ld,"
-      "\"elapsedSeconds\":%ld,\"speedBytesPerSec\":%ld,"
-      "\"etaSeconds\":%ld}",
+      "\"elapsedSeconds\":%ld,\"elapsedMs\":%ld,"
+      "\"bytesRead\":%ld,\"bytesWritten\":%ld,"
+      "\"sourceDev\":%lu,\"destinationDev\":%lu,\"errno\":%d,"
+      "\"speedBytesPerSec\":%ld,\"etaSeconds\":%ld}",
       tb, cb, tf, df, ff, (long)started_at, (long)ended_at,
-      elapsed, speed, eta) != 0) {
+      elapsed, elapsed_ms, read_bytes, written_bytes, source_dev,
+      destination_dev, last_errno, speed, eta) != 0) {
+    free(b.data);
+    return -1;
+  }
+  return serve_owned(req, 200, b.data, b.len);
+}
+
+static int
+transfer_stats_handler(const http_request_t *req) {
+  long elapsed_ms;
+  unsigned long bytes, destination_dev;
+  int error_code;
+  char path[512];
+
+  pthread_mutex_lock(&g_upload.lock);
+  elapsed_ms = g_upload.elapsed_ms;
+  bytes = g_upload.bytes;
+  destination_dev = g_upload.destination_dev;
+  error_code = g_upload.error_code;
+  snprintf(path, sizeof(path), "%s", g_upload.path);
+  pthread_mutex_unlock(&g_upload.lock);
+
+  json_buf_t b = {0};
+  double mbps = elapsed_ms > 0 ?
+      ((double)bytes * 1000.0 / (double)elapsed_ms) / (1024.0 * 1024.0) : 0.0;
+  if(json_append(&b, "{\"ok\":true,\"bufferSize\":") != 0 ||
+     json_appendf(&b, "%u,\"lastUpload\":{\"path\":",
+                  (unsigned int)UPLOAD_BUF_SIZE) != 0 ||
+     json_string(&b, path) != 0 ||
+     json_appendf(&b,
+                  ",\"bytes\":%lu,\"elapsedMs\":%ld,\"averageMBps\":%.2f,"
+                  "\"destinationDev\":%lu,\"errno\":%d}}",
+                  bytes, elapsed_ms, mbps, destination_dev, error_code) != 0) {
     free(b.data);
     return -1;
   }
@@ -1143,6 +1250,7 @@ transfer_request(const http_request_t *req, const char *url) {
   if(!strcmp(url, "/api/fs/mkdir")) return mkdir_handler(req);
   if(!strcmp(url, "/api/fs/rename")) return rename_handler(req);
   if(!strcmp(url, "/api/fs/job/status")) return status_handler(req);
+  if(!strcmp(url, "/api/fs/transfer/stats")) return transfer_stats_handler(req);
   if(!strcmp(url, "/api/fs/job/cancel")) return cancel_handler(req);
   return serve_error(req, 404, "no such endpoint");
 }
@@ -1261,6 +1369,7 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
   char err[200] = {0};
   size_t bytes = 0;
   size_t remaining = content_size;
+  long started_ms = monotonic_ms();
 
   if(initial_size > remaining) initial_size = remaining;
   if(initial_size > 0) {
@@ -1299,7 +1408,31 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
   }
 
   free(buf);
-  close(out);
+  int close_rc = close(out);
+  if(close_rc != 0 && !failed) {
+    failed = 1;
+    snprintf(err, sizeof(err), "close: %s", strerror(errno));
+  }
+  int saved_errno = failed ? (errno ? errno : EIO) : 0;
+  long ended_ms = monotonic_ms();
+  long elapsed_ms = ended_ms > started_ms ? ended_ms - started_ms : 0;
+  struct stat upload_st;
+  unsigned long destination_dev =
+      stat(dir, &upload_st) == 0 ? (unsigned long)upload_st.st_dev : 0;
+  pthread_mutex_lock(&g_upload.lock);
+  g_upload.elapsed_ms = elapsed_ms;
+  g_upload.bytes = (unsigned long)bytes;
+  g_upload.destination_dev = destination_dev;
+  g_upload.error_code = saved_errno;
+  snprintf(g_upload.path, sizeof(g_upload.path), "%s", final_path);
+  pthread_mutex_unlock(&g_upload.lock);
+  double mbps = elapsed_ms > 0 ?
+      ((double)bytes * 1000.0 / (double)elapsed_ms) / (1024.0 * 1024.0) : 0.0;
+  bfpilot_log("upload end rc=%d errno=%d bytes_read=%lu bytes_written=%lu "
+              "elapsed_ms=%ld average_mbps=%.2f dst_dev=%lu path=%s",
+              failed ? -1 : 0, saved_errno, (unsigned long)bytes,
+              (unsigned long)bytes, elapsed_ms, mbps, destination_dev,
+              final_path);
 
   if(failed) {
     drain_body(req->fd, 0, remaining);
@@ -1310,7 +1443,10 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
   json_buf_t b = {0};
   if(json_append(&b, "{\"ok\":true,\"path\":") != 0 ||
      json_string(&b, final_path) != 0 ||
-     json_appendf(&b, ",\"size\":%lu}", (unsigned long)bytes) != 0) {
+     json_appendf(&b,
+                  ",\"size\":%lu,\"elapsedMs\":%ld,\"averageMBps\":%.2f,"
+                  "\"destinationDev\":%lu}",
+                  (unsigned long)bytes, elapsed_ms, mbps, destination_dev) != 0) {
     free(b.data);
     return -1;
   }

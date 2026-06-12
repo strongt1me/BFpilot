@@ -5,4 +5,3 @@
 #pragma once
 
 int sce_resolve_symbol(const char *module, const char *symbol, void **out);
-

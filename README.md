@@ -34,10 +34,10 @@ previous full build.
 
 Use `bfpilot-launcher-installer.elf` only after `bfpilot.elf` works. It is a
 separate optional payload whose only job is installing or refreshing the
-home-screen tile. It intentionally direct-links AppInstUtil, matching the
-websrv/Payload Manager/ftpsrv launcher-install pattern. If the loader rejects
-that import, the installer can fail before `main()`. The file manager is still
-unaffected.
+home-screen tile. It uses the complete pattern proven by ps5 websrv: direct
+`kernel_sys`, SystemService, UserService, and AppInstUtil imports, UserService
+initialization, and temporary system authid during registration. It restores
+the original authid before exit. The file manager is still unaffected.
 
 Use `bfpilot-launcher-installer-safe.elf` only for diagnostics. It does not
 direct-link AppInstUtil and reports whether AppInstUtil is already reachable
@@ -105,10 +105,9 @@ send bfpilot-launcher-installer.elf to <PS5_IP>:9021
 check /data/BFpilot/launcher-installer.log
 ```
 
-If `bfpilot-launcher-installer.elf` gives no notification and no log, send
-`bfpilot-launcher-installer-safe.elf` next. If the safe installer reaches
-`main()` but says AppInstUtil is unavailable, the direct installer is being
-rejected before it can run.
+If `bfpilot-launcher-installer.elf` gives no notification and no log, run the
+probes below to distinguish ordinary entry, incomplete AppInst imports, and the
+complete websrv dependency pattern.
 
 If the launcher installer appears to do nothing, run the probes in this order:
 
@@ -116,6 +115,7 @@ If the launcher installer appears to do nothing, run the probes in this order:
 tests/installer_enter_probe.elf
 tests/installer_linkonly_appinst.elf
 tests/installer_runtime_resolve_appinst.elf
+tests/installer_websrv_pattern.elf
 ```
 
 If `installer_linkonly_appinst.elf` does not create
@@ -190,9 +190,9 @@ make inspect-imports
 
 It fails if `bfpilot.elf` or `bfpilot-debug.elf` contain AppInstUtil,
 `sceAppInst`, `app_installer`, or `BFPL00001` installer fingerprints. Direct
-`libSceAppInstUtil.sprx` import is allowed only for
-`bfpilot-launcher-installer.elf` and
-`tests/installer_linkonly_appinst.elf`.
+`libSceAppInstUtil.sprx` import is allowed only for installer/probe targets.
+The release installer must also import `kernel_sys`, SystemService, and
+UserService; `make inspect-imports` enforces this composition.
 
 ## Project Layout
 

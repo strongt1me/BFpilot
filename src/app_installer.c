@@ -3,7 +3,6 @@
  */
 
 #include <errno.h>
-#include <dirent.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -47,13 +46,11 @@ INCASSET(bfpilot_param_json, "assets-app/param.json");
 INCASSET(bfpilot_icon0_png, "assets-app/icon0.png");
 
 typedef int (*appinst_initialize_fn)(void);
-typedef int (*appinst_uninstall_fn)(const char *);
 typedef int (*app_install_title_dir_fn)(const char *, const char *, void *);
 typedef int (*appinst_install_all_fn)(void *);
 
 typedef struct appinst_api {
   appinst_initialize_fn       initialize;
-  appinst_uninstall_fn        uninstall;
   app_install_title_dir_fn    install_title_dir;
   appinst_install_all_fn      install_all;
 } appinst_api_t;
@@ -61,12 +58,17 @@ typedef struct appinst_api {
 static const uint8_t g_install_marker[] = BFPILOT_INSTALL_MARKER;
 static bfpilot_launcher_diag_t g_launcher_diag = {
   .launcher_enabled = 1,
-  .appinst_init_rc = -1,
+  .launcher_attempted = 0,
+  .appinst_init_rc = BFPILOT_DIAG_SKIPPED,
+  .install_title_rc = BFPILOT_DIAG_SKIPPED,
   .install_title_dir_resolved = 0,
   .uninstall_resolved = 0,
+  .uninstall_rc = BFPILOT_DIAG_SKIPPED,
   .install_all_resolved = 0,
+  .install_all_rc = BFPILOT_DIAG_SKIPPED,
   .user_app_writable = -1,
-  .launcher_install_rc = -1,
+  .launcher_install_rc = BFPILOT_DIAG_SKIPPED,
+  .launcher_final_state = "not-attempted",
 };
 
 
@@ -80,12 +82,17 @@ static void
 reset_launcher_diag(void) {
   bfpilot_launcher_diag_t diag = {
     .launcher_enabled = 1,
-    .appinst_init_rc = -1,
+    .launcher_attempted = 1,
+    .appinst_init_rc = BFPILOT_DIAG_SKIPPED,
+    .install_title_rc = BFPILOT_DIAG_SKIPPED,
     .install_title_dir_resolved = 0,
     .uninstall_resolved = 0,
+    .uninstall_rc = BFPILOT_DIAG_SKIPPED,
     .install_all_resolved = 0,
+    .install_all_rc = BFPILOT_DIAG_SKIPPED,
     .user_app_writable = -1,
-    .launcher_install_rc = -1,
+    .launcher_install_rc = BFPILOT_DIAG_SKIPPED,
+    .launcher_final_state = "resolving-appinst",
   };
   g_launcher_diag = diag;
   publish_launcher_diag();
@@ -111,16 +118,11 @@ resolve_appinst(appinst_api_t *api) {
   bfpilot_log("launcher resolve Initialize %s rc=0x%08x",
               api->initialize ? "ok" : "missing", rc);
 
-  rc = resolve_optional((void **)&api->uninstall,
-                        "sceAppInstUtilAppUnInstall", NULL);
-  g_launcher_diag.uninstall_resolved = api->uninstall != NULL;
-  bfpilot_log("launcher resolve AppUnInstall %s rc=0x%08x",
-              api->uninstall ? "ok" : "missing", rc);
-
   rc = resolve_optional((void **)&api->install_title_dir,
                         "sceAppInstUtilAppInstallTitleDir",
                         BFPILOT_NID_INSTALL_TITLE_DIR);
   g_launcher_diag.install_title_dir_resolved = api->install_title_dir != NULL;
+  g_launcher_diag.title_dir_resolved = api->install_title_dir != NULL;
   bfpilot_log("launcher resolve AppInstallTitleDir %s rc=0x%08x",
               api->install_title_dir ? "ok" : "missing", rc);
 
@@ -135,24 +137,10 @@ resolve_appinst(appinst_api_t *api) {
 
 
 static int
-probe_dir_writable(const char *dir) {
-  char probe[256];
-  int n = snprintf(probe, sizeof(probe), "%s/.bfpilot_write_probe", dir);
-  if(n < 0 || (size_t)n >= sizeof(probe)) return 0;
-
-  int fd = open(probe, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-  if(fd < 0) return 0;
-
-  close(fd);
-  unlink(probe);
-  return 1;
-}
-
-
-static int
 install_app(const appinst_api_t *api, const char *title_id, const char *dir) {
   if(api->install_title_dir) {
     int err = api->install_title_dir(title_id, dir, NULL);
+    g_launcher_diag.install_title_rc = err;
     g_launcher_diag.launcher_install_rc = err;
     publish_launcher_diag();
     if(err == 0) return 0;
@@ -163,6 +151,7 @@ install_app(const appinst_api_t *api, const char *title_id, const char *dir) {
 
   if(api->install_all) {
     int err = api->install_all(NULL);
+    g_launcher_diag.install_all_rc = err;
     g_launcher_diag.launcher_install_rc = err;
     publish_launcher_diag();
     bfpilot_log("launcher install AppInstallAll rc=0x%08x", err);
@@ -221,39 +210,6 @@ mkdir_if_needed(const char *path) {
 
 
 static int
-remove_tree(const char *path) {
-  struct stat st;
-  if(lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
-
-  if(S_ISDIR(st.st_mode)) {
-    DIR *dir = opendir(path);
-    if(!dir) return -1;
-
-    struct dirent *ent;
-    while((ent = readdir(dir))) {
-      if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
-
-      char child[512];
-      int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
-      if(n < 0 || (size_t)n >= sizeof(child)) {
-        closedir(dir);
-        errno = ENAMETOOLONG;
-        return -1;
-      }
-      if(remove_tree(child) != 0) {
-        closedir(dir);
-        return -1;
-      }
-    }
-    closedir(dir);
-    return rmdir(path);
-  }
-
-  return unlink(path);
-}
-
-
-static int
 ensure_data_dir(void) {
   if(mkdir_if_needed("/data") != 0) return -1;
   return mkdir_if_needed(BFPILOT_DATA_DIR);
@@ -273,13 +229,25 @@ bfpilot_install_app_if_needed(void) {
   reset_launcher_diag();
   resolve_appinst(&api);
 
-  g_launcher_diag.user_app_writable = probe_dir_writable(BFPILOT_APP_ROOT);
+  g_launcher_diag.user_app_writable = -1;
   publish_launcher_diag();
-  bfpilot_log("launcher install %s writable=%d", BFPILOT_APP_ROOT,
-              g_launcher_diag.user_app_writable);
+  bfpilot_log("launcher install %s write probe skipped; installer is "
+              "non-destructive until staging", BFPILOT_APP_ROOT);
+  bfpilot_log("launcher metadata title_id=%s "
+              "deeplink=http://127.0.0.1:5905/ param_bytes=%lu "
+              "icon_bytes=%lu icon_png_magic=%s",
+              BFPILOT_APP_TITLE_ID, (unsigned long)bfpilot_param_json_size,
+              (unsigned long)bfpilot_icon0_png_size,
+              bfpilot_icon0_png_size >= 8 &&
+              bfpilot_icon0_png[0] == 0x89 && bfpilot_icon0_png[1] == 'P' &&
+              bfpilot_icon0_png[2] == 'N' && bfpilot_icon0_png[3] == 'G'
+                  ? "yes" : "no");
 
   if(!api.initialize) {
     g_launcher_diag.launcher_install_rc = -2;
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state),
+             "%s", "appinst-unavailable");
     publish_launcher_diag();
     bfpilot_log("launcher install sceAppInstUtilInitialize not resolved");
     bfpilot_notify("BFpilot app failed", "AppInst init not resolved");
@@ -288,6 +256,9 @@ bfpilot_install_app_if_needed(void) {
 
   if(!api.install_title_dir && !api.install_all) {
     g_launcher_diag.launcher_install_rc = -2;
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state),
+             "%s", "install-symbols-unavailable");
     publish_launcher_diag();
     bfpilot_log("launcher install no AppInst install function resolved");
     bfpilot_notify("BFpilot app failed", "AppInst install not resolved");
@@ -324,40 +295,24 @@ bfpilot_install_app_if_needed(void) {
     bfpilot_log("launcher install sceAppInstUtilInitialize failed rc=0x%08x",
                 err);
     g_launcher_diag.launcher_install_rc = err;
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state),
+             "%s", "appinst-init-failed");
     publish_launcher_diag();
     snprintf(msg, sizeof(msg), "AppInst init failed 0x%08x", err);
     bfpilot_notify("BFpilot app failed", msg);
     return -1;
   }
 
-  if(api.uninstall) {
-    int uninstall_err = api.uninstall(BFPILOT_APP_TITLE_ID);
-    bfpilot_log("launcher install refresh BFpilot tile rc=0x%08x",
-                uninstall_err);
-    uninstall_err = api.uninstall(BFPILOT_INVALID_APP_TITLE_ID);
-    bfpilot_log("launcher install remove invalid BFpilot tile rc=0x%08x",
-                uninstall_err);
-    uninstall_err = api.uninstall(BFPILOT_LEGACY_APP_TITLE_ID);
-    bfpilot_log("launcher install remove BS5FileManager tile rc=0x%08x",
-                uninstall_err);
-    uninstall_err = api.uninstall(BFPILOT_OLD_LEGACY_APP_TITLE_ID);
-    bfpilot_log("launcher install remove old legacy tile rc=0x%08x",
-                uninstall_err);
-  } else {
-    bfpilot_log("launcher install AppUnInstall not resolved, skipping removes");
-  }
-
-  char invalid_dir[256];
-  snprintf(invalid_dir, sizeof(invalid_dir), BFPILOT_APP_ROOT "/%s",
-           BFPILOT_INVALID_APP_TITLE_ID);
-  if(remove_tree(invalid_dir) != 0) {
-    bfpilot_log("launcher install warning failed removing %s errno=%d",
-                invalid_dir, errno);
-  }
+  bfpilot_log("launcher existing/legacy tile removal skipped: "
+              "non-destructive refresh");
 
   if(mkdir_if_needed(app_dir) != 0 || mkdir_if_needed(sce_sys_dir) != 0) {
     bfpilot_log("launcher install mkdir failed errno=%d", errno);
     g_launcher_diag.launcher_install_rc = -errno;
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state),
+             "%s", "staging-mkdir-failed");
     publish_launcher_diag();
     snprintf(msg, sizeof(msg), "mkdir failed errno %d", errno);
     bfpilot_notify("BFpilot app failed", msg);
@@ -368,6 +323,9 @@ bfpilot_install_app_if_needed(void) {
     bfpilot_log("launcher install failed writing %s errno=%d",
                 param_path, errno);
     g_launcher_diag.launcher_install_rc = -errno;
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state),
+             "%s", "param-write-failed");
     publish_launcher_diag();
     bfpilot_notify("BFpilot app failed", "could not write param.json");
     return -1;
@@ -377,6 +335,9 @@ bfpilot_install_app_if_needed(void) {
     bfpilot_log("launcher install failed writing %s errno=%d",
                 icon_path, errno);
     g_launcher_diag.launcher_install_rc = -errno;
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state),
+             "%s", "icon-write-failed");
     publish_launcher_diag();
     bfpilot_notify("BFpilot app failed", "could not write icon0.png");
     return -1;
@@ -384,6 +345,10 @@ bfpilot_install_app_if_needed(void) {
 
   err = install_app(&api, BFPILOT_APP_TITLE_ID, BFPILOT_APP_PARENT);
   if(err) {
+    snprintf(g_launcher_diag.launcher_final_state,
+             sizeof(g_launcher_diag.launcher_final_state),
+             "%s", "registration-failed");
+    publish_launcher_diag();
     bfpilot_log("launcher install install_app failed rc=0x%08x", err);
     snprintf(msg, sizeof(msg), "register BFPL00001 failed 0x%08x", err);
     bfpilot_notify("BFpilot app failed", msg);
@@ -401,5 +366,8 @@ bfpilot_install_app_if_needed(void) {
 
   bfpilot_notify("BFpilot app ready",
                  "Tile BFPL00001 opens http://127.0.0.1:5905/");
+  snprintf(g_launcher_diag.launcher_final_state,
+           sizeof(g_launcher_diag.launcher_final_state), "%s", "installed");
+  publish_launcher_diag();
   return 1;
 }

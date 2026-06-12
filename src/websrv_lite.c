@@ -349,6 +349,7 @@ status_request(const http_request_t *req) {
                    "\"pid\":%ld,"
                    "\"now\":%ld,"
                    "\"services\":[\"web\",\"file-manager\"],"
+                   "\"diagReadOnly\":true,"
                    "\"launcherCompiled\":%s,"
                    "\"launcherDisabled\":%s,"
                    "\"port\":%u}",
@@ -412,6 +413,7 @@ diag_request(const http_request_t *req) {
                    "\"can_opendir_ext0_homebrew\":%s,"
                    "\"can_write_data_bfpilot\":%s,"
                    "\"can_write_user_app\":%s,"
+                   "\"write_probe_policy\":\"skipped-read-only\","
                    "\"launcher_status\":\"%s\","
                    "\"last_errno\":%d,"
                    "\"checkpoint\":\"%s\","
@@ -451,7 +453,7 @@ diag_request(const http_request_t *req) {
                    "\"launcher_final_state\":\"%s\"},"
                    "\"notifications\":{\"mode\":\"optional-raw-debug\"},"
                    "\"routes\":[\"/\",\"/api/status\",\"/api/diag\","
-                   "\"/fs\",\"/api/fs/*\"]}",
+                   "\"/fs\",\"/api/fs/*\",\"/api/fs/transfer/stats\"]}",
                    VERSION_TAG, BUILD_VERSION, BFPILOT_BUILD_MODE,
                    (long)getpid(), (long)now,
                    bfpilot_diag_uptime(),
@@ -463,8 +465,8 @@ diag_request(const http_request_t *req) {
                    json_bool(can_opendir_usb0),
                    json_bool(can_opendir_ext0),
                    json_bool(can_opendir_ext0_homebrew),
-                   json_bool(can_write_data),
-                   json_bool(can_write_user_app),
+                   json_tristate(can_write_data),
+                   json_tristate(can_write_user_app),
                    launcher_status_json,
                    last_errno,
                    checkpoint_json,

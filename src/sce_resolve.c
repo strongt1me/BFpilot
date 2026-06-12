@@ -9,7 +9,6 @@
 
 #include "sce_resolve.h"
 
-
 int
 sce_resolve_symbol(const char *module, const char *symbol, void **out) {
   uint32_t handle = 0;

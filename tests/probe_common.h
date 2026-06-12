@@ -44,7 +44,7 @@ probe_write_marker(const char *path, const char *payload_name) {
   if(n < 0) return -EINVAL;
   if((size_t)n >= sizeof(line)) n = (int)sizeof(line) - 1;
 
-  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
   if(fd < 0) return -errno;
 
   ssize_t wr = write(fd, line, (size_t)n);

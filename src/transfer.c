@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "diag.h"
+#include "archive_worker.h"
 #include "transfer.h"
 #include "websrv.h"
 
@@ -36,6 +37,15 @@
 #define BFPILOT_SHORTCUTS_PATH "/data/BFpilot/shortcuts.txt"
 #define BFPILOT_SHORTCUTS_TMP "/data/BFpilot/shortcuts.tmp"
 #define BFPILOT_MAX_SHORTCUTS 32
+#define BFPILOT_ARCHIVE_DIR "/data/bfpilot/archive"
+#define BFPILOT_ARCHIVE_JOB BFPILOT_ARCHIVE_DIR "/job.ini"
+#define BFPILOT_ARCHIVE_JOB_TMP BFPILOT_ARCHIVE_DIR "/job.tmp"
+#define BFPILOT_ARCHIVE_STATUS BFPILOT_ARCHIVE_DIR "/status.json"
+#define BFPILOT_ARCHIVE_STATUS_TMP BFPILOT_ARCHIVE_DIR "/status.tmp"
+
+#ifndef BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+#define BFPILOT_ENABLE_INTEGRATED_ARCHIVE 0
+#endif
 
 
 typedef struct json_buf {
@@ -140,6 +150,10 @@ serve_error(const http_request_t *req, int status, const char *msg) {
 }
 
 
+static int write_all_fd(int fd, const void *data, size_t size);
+static void drain_body(int fd, size_t already_read, size_t content_size);
+
+
 static int
 path_is_safe(const char *p) {
   if(!p || !*p) return 0;
@@ -207,6 +221,53 @@ path_is_same_or_child(const char *base, const char *path) {
 }
 
 
+static int
+path_has_dotdot_segment(const char *path) {
+  const char *p = path ? path : "";
+  while(*p) {
+    while(*p == '/') p++;
+    const char *start = p;
+    while(*p && *p != '/') p++;
+    if((size_t)(p - start) == 2 && start[0] == '.' && start[1] == '.') {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+
+static int
+path_starts_with_root(const char *path, const char *root) {
+  size_t n = strlen(root);
+  return strncmp(path, root, n) == 0 && (path[n] == 0 || path[n] == '/');
+}
+
+
+static int
+archive_path_allowed(const char *path) {
+  if(!path_is_safe(path) || path_has_dotdot_segment(path)) return 0;
+  if(path_starts_with_root(path, "/data")) return 1;
+  for(int i = 0; i < 8; i++) {
+    char root[32];
+    snprintf(root, sizeof(root), "/mnt/usb%d", i);
+    if(path_starts_with_root(path, root)) return 1;
+    snprintf(root, sizeof(root), "/mnt/ext%d", i);
+    if(path_starts_with_root(path, root)) return 1;
+  }
+  return 0;
+}
+
+
+static int
+config_value_safe(const char *value, int allow_empty) {
+  if(!value || (!allow_empty && !*value)) return 0;
+  for(const unsigned char *p = (const unsigned char *)value; *p; p++) {
+    if(*p < 0x20 || *p == 0x7f) return 0;
+  }
+  return 1;
+}
+
+
 struct job_state {
   pthread_mutex_t lock;
   atomic_int      busy;
@@ -249,6 +310,14 @@ struct upload_state {
 static struct upload_state g_upload = {
   .lock = PTHREAD_MUTEX_INITIALIZER,
 };
+
+static atomic_int g_archive_busy = 0;
+
+
+int
+transfer_archive_busy(void) {
+  return atomic_load(&g_archive_busy) != 0;
+}
 
 
 static long
@@ -1557,6 +1626,384 @@ transfer_stats_handler(const http_request_t *req) {
 
 
 static int
+read_request_body(const http_request_t *req, const char *initial_data,
+                  size_t initial_size, size_t content_size,
+                  size_t max_size, char **out) {
+  if(content_size > max_size) {
+    drain_body(req->fd, initial_size, content_size);
+    return -1;
+  }
+  char *body = calloc(1, content_size + 1);
+  if(!body) {
+    drain_body(req->fd, initial_size, content_size);
+    return -1;
+  }
+  if(initial_size > content_size) initial_size = content_size;
+  if(initial_size > 0) memcpy(body, initial_data, initial_size);
+
+  size_t used = initial_size;
+  while(used < content_size) {
+    ssize_t n = recv(req->fd, body + used, content_size - used, 0);
+    if(n < 0) {
+      if(errno == EINTR) continue;
+      free(body);
+      return -1;
+    }
+    if(n == 0) {
+      free(body);
+      return -1;
+    }
+    used += (size_t)n;
+  }
+  body[content_size] = 0;
+  *out = body;
+  return 0;
+}
+
+
+static int
+form_get_arg(const char *body, const char *name, char *out, size_t out_size) {
+  const char *p = body;
+  char key[128];
+  char value[2048];
+
+  if(out_size > 0) out[0] = 0;
+  while(p && *p) {
+    const char *amp = strchr(p, '&');
+    size_t pair_len = amp ? (size_t)(amp - p) : strlen(p);
+    const char *eq = memchr(p, '=', pair_len);
+    size_t key_len = eq ? (size_t)(eq - p) : pair_len;
+    size_t val_len = eq ? pair_len - key_len - 1 : 0;
+
+    if(key_len >= sizeof(key)) key_len = sizeof(key) - 1;
+    memcpy(key, p, key_len);
+    key[key_len] = 0;
+    websrv_url_decode(key, sizeof(key), key);
+
+    if(!strcmp(key, name)) {
+      if(val_len >= sizeof(value)) val_len = sizeof(value) - 1;
+      if(eq) memcpy(value, eq + 1, val_len);
+      value[val_len] = 0;
+      websrv_url_decode(out, out_size, value);
+      return 1;
+    }
+
+    if(!amp) break;
+    p = amp + 1;
+  }
+  return 0;
+}
+
+
+static int
+write_text_atomic(const char *tmp_path, const char *final_path,
+                  const char *data, size_t size, mode_t mode) {
+  int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+  if(fd < 0) return -1;
+  int rc = write_all_fd(fd, data, size);
+  if(close(fd) != 0 && rc == 0) rc = -1;
+  if(rc != 0) {
+    unlink(tmp_path);
+    return -1;
+  }
+  if(rename(tmp_path, final_path) != 0) {
+    unlink(tmp_path);
+    return -1;
+  }
+  return 0;
+}
+
+
+static int
+archive_write_status_prepared(const char *src, const char *dst) {
+  json_buf_t b = {0};
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  const char *worker = "bfpilot-integrated-archive";
+  const char *current = "starting integrated archive extractor";
+  const char *requires_injection = "false";
+#else
+  const char *worker = "bfpilot-archive-worker";
+  const char *current = "inject bfpilot-archive-worker.elf";
+  const char *requires_injection = "true";
+#endif
+  if(json_append(&b,
+                 "{\"ok\":true,\"worker\":\"") != 0 ||
+     json_append(&b, worker) != 0 ||
+     json_append(&b,
+                 "\",\"state\":\"prepared\",\"archiveType\":\"pending\","
+                 "\"source\":") != 0 ||
+     json_string(&b, src) != 0 ||
+     json_append(&b, ",\"destination\":") != 0 ||
+     json_string(&b, dst) != 0 ||
+     json_append(&b, ",\"stage\":\"\",\"current\":") != 0 ||
+     json_string(&b, current) != 0 ||
+     json_append(&b,
+                 ",\"error\":\"\",\"percent\":0,\"totalBytes\":0,"
+                 "\"bytesWritten\":0,\"filesDone\":0,\"totalFiles\":0,"
+                 "\"elapsedMs\":0,\"averageMBps\":0,\"errno\":0,"
+                 "\"requiresInjection\":") != 0 ||
+     json_append(&b, requires_injection) != 0 ||
+     json_append(&b, "}") != 0) {
+    free(b.data);
+    return -1;
+  }
+  int rc = write_text_atomic(BFPILOT_ARCHIVE_STATUS_TMP,
+                             BFPILOT_ARCHIVE_STATUS, b.data, b.len, 0666);
+  free(b.data);
+  return rc;
+}
+
+
+static int
+archive_status_handler(const http_request_t *req) {
+  int fd = open(BFPILOT_ARCHIVE_STATUS, O_RDONLY);
+  if(fd < 0) {
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    const char idle[] =
+        "{\"ok\":true,\"worker\":\"bfpilot-integrated-archive\","
+        "\"state\":\"idle\",\"requiresInjection\":false}";
+#else
+    const char idle[] =
+        "{\"ok\":true,\"worker\":\"bfpilot-archive-worker\","
+        "\"state\":\"idle\",\"requiresInjection\":true}";
+#endif
+    return websrv_send(req->fd, 200, "application/json",
+                       idle, sizeof(idle) - 1);
+  }
+  char *buf = malloc(32768);
+  if(!buf) {
+    close(fd);
+    return serve_error(req, 500, "out of memory");
+  }
+  ssize_t n = read(fd, buf, 32767);
+  int saved = errno;
+  close(fd);
+  if(n < 0) {
+    free(buf);
+    errno = saved;
+    return serve_error(req, 500, strerror(errno));
+  }
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  buf[n] = 0;
+  if(strstr(buf, "\"state\":\"done\"") ||
+     strstr(buf, "\"state\":\"error\"") ||
+     strstr(buf, "\"state\":\"idle\"")) {
+    atomic_store(&g_archive_busy, 0);
+  }
+#endif
+  return serve_owned(req, 200, buf, (size_t)n);
+}
+
+
+static int
+archive_support_handler(const http_request_t *req) {
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  const char body[] =
+      "{\"ok\":true,\"worker\":\"bfpilot-integrated-archive\","
+      "\"fallbackWorker\":\"bfpilot-archive-worker.elf\","
+      "\"requiresInjection\":false,"
+#else
+  const char body[] =
+      "{\"ok\":true,\"worker\":\"bfpilot-archive-worker.elf\","
+      "\"requiresInjection\":true,"
+#endif
+      "\"jobPath\":\"/data/bfpilot/archive/job.ini\","
+      "\"statusPath\":\"/data/bfpilot/archive/status.json\","
+      "\"supported\":[\"rar\",\"7z\",\"7z.001\",\"zip\"],"
+      "\"passwords\":{\"rar\":true,\"7z\":true,"
+      "\"zip\":\"ZipCrypto only; AES zip reports unsupported\"},"
+      "\"multipart\":{\"rar\":true,\"7z.001\":true,"
+      "\"zip\":false},"
+      "\"allowedRoots\":[\"/data\",\"/mnt/usb0-7\",\"/mnt/ext0-7\"]}";
+  return websrv_send(req->fd, 200, "application/json",
+                     body, sizeof(body) - 1);
+}
+
+
+int
+transfer_archive_prepare_request(const http_request_t *req,
+                                 const char *initial_data,
+                                 size_t initial_size,
+                                 size_t content_size) {
+  char *body = NULL;
+  char src[1024], dst[1024], password[512], threads[32];
+
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  int expected = 0;
+  if(!atomic_compare_exchange_strong(&g_archive_busy, &expected, 1)) {
+    int fd = open(BFPILOT_ARCHIVE_STATUS, O_RDONLY);
+    if(fd >= 0) {
+      char status[2048];
+      ssize_t n = read(fd, status, sizeof(status) - 1);
+      close(fd);
+      if(n > 0) {
+        status[n] = 0;
+        if(strstr(status, "\"state\":\"done\"") ||
+           strstr(status, "\"state\":\"error\"") ||
+           strstr(status, "\"state\":\"idle\"")) {
+          atomic_store(&g_archive_busy, 0);
+          expected = 0;
+          if(atomic_compare_exchange_strong(&g_archive_busy, &expected, 1)) {
+            goto archive_busy_claimed;
+          }
+        }
+      }
+    }
+    drain_body(req->fd, initial_size, content_size);
+    return serve_error(req, 409, "archive extraction is already running");
+  }
+archive_busy_claimed:
+#endif
+
+  if(read_request_body(req, initial_data, initial_size, content_size,
+                       8192, &body) != 0) {
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return serve_error(req, 400, "archive prepare body is too large or invalid");
+  }
+
+  int ok = form_get_arg(body, "src", src, sizeof(src)) &&
+           form_get_arg(body, "dst", dst, sizeof(dst));
+  if(!form_get_arg(body, "password", password, sizeof(password))) {
+    password[0] = 0;
+  }
+  if(!form_get_arg(body, "threads", threads, sizeof(threads))) {
+    snprintf(threads, sizeof(threads), "%s", "0");
+  }
+  free(body);
+
+  int src_allowed = archive_path_allowed(src);
+  int dst_allowed = archive_path_allowed(dst);
+  int src_text_ok = config_value_safe(src, 0);
+  int dst_text_ok = config_value_safe(dst, 0);
+  int password_text_ok = config_value_safe(password, 1);
+  int threads_text_ok = config_value_safe(threads, 1);
+  if(!ok || !src_allowed || !dst_allowed || !src_text_ok || !dst_text_ok ||
+     !password_text_ok || !threads_text_ok) {
+    char err[256];
+    snprintf(err, sizeof(err),
+             "bad archive request fields ok=%d src_allowed=%d "
+             "dst_allowed=%d src_text=%d dst_text=%d password_text=%d "
+             "threads_text=%d",
+             ok, src_allowed, dst_allowed, src_text_ok, dst_text_ok,
+             password_text_ok, threads_text_ok);
+    int rc = serve_error(req, 400, err);
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+
+  struct stat st;
+  if(stat(src, &st) != 0 || !S_ISREG(st.st_mode)) {
+    int rc = serve_error(req, 404, "archive source is not a file");
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+  if(stat(dst, &st) == 0) {
+    int rc = serve_error(req, 409, "archive destination already exists");
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+  if(errno != ENOENT) {
+    int rc = serve_error(req, 500, strerror(errno));
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+
+  if(mkdirs(BFPILOT_ARCHIVE_DIR) != 0) {
+    int rc = serve_error(req, 500, strerror(errno));
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+
+  json_buf_t job = {0};
+  if(json_append(&job, "source=") != 0 ||
+     json_append(&job, src) != 0 ||
+     json_append(&job, "\ndestination=") != 0 ||
+     json_append(&job, dst) != 0 ||
+     json_append(&job, "\npassword=") != 0 ||
+     json_append(&job, password) != 0 ||
+     json_append(&job, "\nthreads=") != 0 ||
+     json_append(&job, threads) != 0 ||
+     json_append(&job, "\ncleanupPartial=0\n") != 0) {
+    free(job.data);
+    int rc = serve_error(req, 500, "out of memory");
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+  if(write_text_atomic(BFPILOT_ARCHIVE_JOB_TMP, BFPILOT_ARCHIVE_JOB,
+                       job.data, job.len, 0600) != 0) {
+    free(job.data);
+    int rc = serve_error(req, 500, strerror(errno));
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+  free(job.data);
+
+  if(archive_write_status_prepared(src, dst) != 0) {
+    int rc = serve_error(req, 500, strerror(errno));
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return rc;
+  }
+
+  bfpilot_log("archive prepare source=%s destination=%s password=%s",
+              src, dst, password[0] ? "provided" : "empty");
+
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  bfpilot_log("archive integrated daemon job queued");
+#endif
+
+  json_buf_t res = {0};
+  if(json_append(&res,
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+                 "{\"ok\":true,\"worker\":\"bfpilot-integrated-archive\","
+                 "\"fallbackWorker\":\"bfpilot-archive-worker.elf\","
+                 "\"requiresInjection\":false,\"jobPath\":") != 0 ||
+#else
+                 "{\"ok\":true,\"worker\":\"bfpilot-archive-worker.elf\","
+                 "\"requiresInjection\":true,\"jobPath\":") != 0 ||
+#endif
+     json_string(&res, BFPILOT_ARCHIVE_JOB) != 0 ||
+     json_append(&res, ",\"statusPath\":") != 0 ||
+     json_string(&res, BFPILOT_ARCHIVE_STATUS) != 0 ||
+     json_append(&res, ",\"source\":") != 0 ||
+     json_string(&res, src) != 0 ||
+     json_append(&res, ",\"destination\":") != 0 ||
+     json_string(&res, dst) != 0 ||
+     json_append(&res, ",\"next\":") != 0 ||
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+     json_string(&res, "archive extraction started") != 0 ||
+#else
+     json_string(&res, "inject bfpilot-archive-worker.elf") != 0 ||
+#endif
+     json_append(&res, "}") != 0) {
+    free(res.data);
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+    atomic_store(&g_archive_busy, 0);
+#endif
+    return -1;
+  }
+  return serve_owned(req, 200, res.data, res.len);
+}
+
+
+static int
 cancel_handler(const http_request_t *req) {
   if(atomic_load(&g_job.busy)) {
     atomic_store(&g_job.cancel, 1);
@@ -1582,6 +2029,8 @@ transfer_request(const http_request_t *req, const char *url) {
   if(!strcmp(url, "/api/fs/rename")) return rename_handler(req);
   if(!strcmp(url, "/api/fs/job/status")) return status_handler(req);
   if(!strcmp(url, "/api/fs/transfer/stats")) return transfer_stats_handler(req);
+  if(!strcmp(url, "/api/fs/archive/status")) return archive_status_handler(req);
+  if(!strcmp(url, "/api/fs/archive/support")) return archive_support_handler(req);
   if(!strcmp(url, "/api/fs/job/cancel")) return cancel_handler(req);
   return serve_error(req, 404, "no such endpoint");
 }

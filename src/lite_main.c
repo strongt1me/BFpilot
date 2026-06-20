@@ -24,6 +24,8 @@
 #include "boot_marker.h"
 #include "diag.h"
 #include "notify.h"
+#include "archive_worker.h"
+#include "transfer.h"
 #include "version.h"
 #include "websrv.h"
 
@@ -39,6 +41,10 @@
 
 #ifndef BFPILOT_DEBUG_NOTIFICATIONS
 #define BFPILOT_DEBUG_NOTIFICATIONS 0
+#endif
+
+#ifndef BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+#define BFPILOT_ENABLE_INTEGRATED_ARCHIVE 0
 #endif
 
 static void
@@ -191,7 +197,14 @@ old_server_busy(unsigned short port) {
                     sizeof(response)) != 0) {
     return 0;
   }
-  return strstr(response, "\"busy\":true") != NULL;
+  if(strstr(response, "\"busy\":true") != NULL) return 1;
+  if(local_http_get(port, "/api/fs/archive/status", response,
+                    sizeof(response)) != 0) {
+    return 0;
+  }
+  return strstr(response, "\"state\":\"running\"") != NULL ||
+         strstr(response, "\"state\":\"finalizing\"") != NULL ||
+         strstr(response, "\"state\":\"starting\"") != NULL;
 }
 
 
@@ -317,7 +330,7 @@ main(int argc, char **argv) {
   puts("");
   puts("  active: standalone web file manager");
   printf("  mode: %s\n", BFPILOT_BUILD_MODE);
-  puts("  scope: browse, upload, download, copy, move, delete, rename, mkdir");
+  puts("  scope: browse, upload, download, copy, move, delete, rename, mkdir, extract");
   puts("  ps5 app: launcher installer is a separate optional payload");
   printf("  web ui: http://%s:%u/\n", ready.ip, (unsigned int)ready.port);
   puts("  inject/deploy port: 9021");
@@ -350,6 +363,11 @@ main(int argc, char **argv) {
     puts("  reload: old listener still active; exiting this injection");
     return 0;
   }
+
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  int archive_daemon_rc = bfpilot_archive_start_daemon();
+  bfpilot_log("archive daemon start rc=%d", archive_daemon_rc);
+#endif
 
   while(1) {
     bfpilot_checkpoint("web listen starting");

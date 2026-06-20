@@ -456,7 +456,10 @@ diag_request(const http_request_t *req) {
                    "\"/fs\",\"/api/fs/*\",\"/api/fs/places\","
                    "\"/api/fs/shortcut/add\",\"/api/fs/shortcut/delete\","
                    "\"/api/fs/shortcut/rename\","
-                   "\"/api/fs/transfer/stats\"]}",
+                   "\"/api/fs/transfer/stats\","
+                   "\"/api/fs/archive/support\","
+                   "\"/api/fs/archive/status\","
+                   "\"/api/fs/archive/prepare\"]}",
                    VERSION_TAG, BUILD_VERSION, BFPILOT_BUILD_MODE,
                    (long)getpid(), (long)now,
                    bfpilot_diag_uptime(),
@@ -558,6 +561,10 @@ dispatch_request(const http_request_t *req, const char *initial_body,
       return transfer_upload_request(req, initial_body, initial_size,
                                      content_size);
     }
+    if(!strcmp(req->path, "/api/fs/archive/prepare")) {
+      return transfer_archive_prepare_request(req, initial_body, initial_size,
+                                              content_size);
+    }
     return websrv_send_error_json(req->fd, 404, "not found");
   }
 
@@ -601,6 +608,7 @@ client_thread(void *arg) {
     goto done;
   }
 
+  char first_body_byte = buf[header_end];
   buf[header_end] = 0;
 
   char method[8];
@@ -624,6 +632,7 @@ client_thread(void *arg) {
 
   size_t content_size = content_length_from_headers(buf);
   size_t initial_size = used - (size_t)header_end;
+  buf[header_end] = first_body_byte;
   const char *initial = buf + header_end;
   if(initial_size > content_size) initial_size = content_size;
 

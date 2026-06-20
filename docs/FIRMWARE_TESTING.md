@@ -20,6 +20,7 @@ Expected outputs:
 ```text
 bfpilot.elf
 bfpilot-launcher-installer.elf
+bfpilot-archive-worker.elf
 ```
 
 Failure meaning: local toolchain, source, or import-boundary failure. Do not
@@ -119,9 +120,61 @@ Failure meaning:
 
 Do not benchmark user files.
 
-## 5. Launcher Installer
+## 5. Archive Extraction
 
-Run only after stages 1-4 pass:
+Run only after stages 1-4 pass. Use only small BFpilot-owned test archives
+under `/data/test` unless you intentionally want to extract a specific user
+archive.
+
+Prepare an archive job through the UI `Extract` button or directly:
+
+```sh
+curl -X POST "http://$PS5_IP:${BF_WEB_PORT:-5905}/api/fs/archive/prepare" \
+  --data-urlencode "src=/data/test/example.7z" \
+  --data-urlencode "dst=/data/test/bfpilot-example-out" \
+  --data-urlencode "password=" \
+  --data-urlencode "threads=1"
+curl "http://$PS5_IP:${BF_WEB_PORT:-5905}/api/fs/archive/status"
+```
+
+Expected endpoints:
+
+- `/api/fs/archive/support`: HTTP 200 with supported formats and limitations.
+- `/api/fs/archive/support`: `requiresInjection=false` for the normal
+  integrated daemon path.
+- `/api/fs/archive/status`: briefly `state=prepared` while the daemon picks up
+  the job.
+- `/api/fs/archive/status`: `state=done`, `percent=100`, and
+  `archiveExitCode=0` after successful extraction.
+
+Expected files:
+
+- `/data/bfpilot/archive/status.json`
+- `/data/bfpilot/archive/archive-worker.log`
+- the requested destination directory only after finalization succeeds
+
+Expected failure diagnostics:
+
+- `7z password required`: retry with the correct password.
+- `bad 7z password or extraction aborted`: password was supplied but rejected.
+- `RAR password required or next multipart volume is missing`: retry with the
+  password or place all RAR volumes next to the first archive.
+- `zip AES encryption is not supported yet`: use a non-AES ZIP, RAR, or 7z.
+- `unsafe zip member path`: archive contains absolute or parent-directory
+  paths and is intentionally refused.
+
+Do not share `/data/bfpilot/archive/job.ini` if a password was used. It is a
+local job handoff file and can contain the archive password until another job is
+prepared.
+
+Fallback: `bfpilot-archive-worker.elf` still exists for diagnostics. Use it only
+if `/api/fs/archive/support` unexpectedly reports `requiresInjection=true`, or
+if you are intentionally comparing the standalone daemon against the old worker
+path.
+
+## 6. Launcher Installer
+
+Run only after stages 1-5 pass:
 
 ```sh
 python3 payload_sender.py "$PS5_IP" "${BF_PAYLOAD_PORT:-9021}" \
@@ -153,7 +206,7 @@ Failure meaning:
 - Tile installed but opens the wrong URL: compare `param.json` and the logged
   deep link.
 
-## 6. Files To Save
+## 7. Files To Save
 
 For every failure, save:
 
@@ -162,6 +215,8 @@ For every failure, save:
 /data/BFpilot/log.txt
 /data/BFpilot/crash.log
 /data/BFpilot/launcher-installer.log
+/data/bfpilot/archive/status.json
+/data/bfpilot/archive/archive-worker.log
 diagnostics/ps5-diag-*.json
 ```
 

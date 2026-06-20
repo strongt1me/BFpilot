@@ -702,6 +702,7 @@
         <button id="new-folder">New Folder</button>
         <button id="rename">Rename</button>
         <button id="download">Download</button>
+        <button id="extract" class="primary">Extract</button>
         <button id="upload-files" class="warn">Upload Files</button>
         <button id="upload-folder" class="warn">Upload Folder</button>
         <button id="delete" class="danger">Delete</button>
@@ -766,7 +767,8 @@
       uploadXhr: null,
       placesTimer: 0,
       jobTimer: 0,
-      jobHideTimer: 0
+      jobHideTimer: 0,
+      archiveTimer: 0
     };
 
     function el(id) {
@@ -801,6 +803,23 @@
           throw new Error(body.error || ('HTTP ' + response.status));
         }
         return body;
+      });
+    }
+
+    function postForm(url, fields) {
+      const body = new URLSearchParams();
+      Object.keys(fields).forEach((key) => body.set(key, fields[key]));
+      return fetch(url, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+      }).then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.ok === false) {
+          throw new Error(data.error || ('HTTP ' + response.status));
+        }
+        return data;
       });
     }
 
@@ -1057,6 +1076,29 @@
       return mb.toFixed(mb >= 10 ? 1 : 2) + ' MB/s';
     }
 
+    function isArchiveName(name) {
+      const lower = String(name || '').toLowerCase();
+      return lower.endsWith('.zip') ||
+        lower.endsWith('.rar') ||
+        lower.endsWith('.7z') ||
+        lower.endsWith('.7z.001') ||
+        /\.part\d+\.rar$/.test(lower) ||
+        /\.r\d\d$/.test(lower);
+    }
+
+    function archiveStem(name) {
+      let stem = String(name || 'archive');
+      const lower = stem.toLowerCase();
+      if (lower.endsWith('.7z.001')) return stem.slice(0, -7);
+      if (lower.endsWith('.part1.rar')) return stem.slice(0, -10);
+      if (/\.part\d+\.rar$/i.test(stem)) {
+        return stem.replace(/\.part\d+\.rar$/i, '');
+      }
+      if (/\.(zip|rar|7z)$/i.test(stem)) return stem.replace(/\.(zip|rar|7z)$/i, '');
+      if (/\.r\d\d$/i.test(stem)) return stem.replace(/\.r\d\d$/i, '');
+      return stem;
+    }
+
     function formatDate(seconds) {
       if (!Number.isFinite(seconds) || seconds <= 0) return 'Unknown';
       return new Date(seconds * 1000).toLocaleString();
@@ -1117,6 +1159,7 @@
       el('job-verb').textContent = verb || 'Working';
       el('job-text').textContent = text || '';
       el('job-fill').style.width = Math.max(0, Math.min(100, pct || 0)).toFixed(1) + '%';
+      el('job-cancel').disabled = false;
     }
 
     function uploadProgressText(doneBytes, totalBytes, startedAt, index, count, name, failed, cancelling) {
@@ -1151,6 +1194,95 @@
       setJobBox('upload', uploadProgressText(
         doneBytes, totalBytes, startedAt, index, count, name, failed, cancelling
       ), pct);
+    }
+
+    function archiveProgressText(job) {
+      const pct = Number(job.percent || 0);
+      const written = Number(job.bytesWritten || 0);
+      const total = Number(job.totalBytes || 0);
+      const parts = [];
+      if (job.state === 'prepared') {
+        parts.push('Job prepared');
+        parts.push(job.requiresInjection ? 'inject bfpilot-archive-worker.elf to start' : 'starting');
+      } else {
+        parts.push(job.state || 'archive');
+      }
+      if (job.archiveType && job.archiveType !== 'pending') parts.push(job.archiveType);
+      if (total > 0) {
+        parts.push(shortSize(written) + ' / ' + shortSize(total));
+      }
+      if (pct > 0) parts.push(Math.max(0, Math.min(100, pct)).toFixed(0) + '%');
+      if (job.averageMBps > 0) parts.push(Number(job.averageMBps).toFixed(2) + ' MB/s');
+      if (job.filesDone || job.totalFiles) {
+        parts.push(Number(job.filesDone || 0) + ' / ' + Number(job.totalFiles || 0) + ' files');
+      }
+      if (job.current) parts.push(job.current);
+      if (job.error) parts.push(job.error);
+      return parts.join(' | ');
+    }
+
+    function pollArchiveStatus() {
+      const box = el('job');
+      const fill = el('job-fill');
+      const text = el('job-text');
+      const verb = el('job-verb');
+      const cancel = el('job-cancel');
+
+      if (state.archiveTimer) clearInterval(state.archiveTimer);
+      if (state.jobHideTimer) {
+        clearTimeout(state.jobHideTimer);
+        state.jobHideTimer = 0;
+      }
+      box.classList.add('show');
+      verb.textContent = 'extract';
+      text.textContent = 'Waiting for archive status';
+      cancel.disabled = true;
+      let missed = 0;
+
+      async function tick() {
+        try {
+          const job = await api('/api/fs/archive/status');
+          missed = 0;
+          const pct = Math.max(0, Math.min(100, Number(job.percent || 0)));
+          fill.style.width = pct.toFixed(1) + '%';
+          verb.textContent = 'extract';
+          text.textContent = archiveProgressText(job);
+          cancel.disabled = true;
+
+          if (job.state === 'idle') {
+            clearInterval(state.archiveTimer);
+            state.archiveTimer = 0;
+            box.classList.remove('show');
+            cancel.disabled = false;
+          } else if (job.state === 'done' || job.state === 'error') {
+            clearInterval(state.archiveTimer);
+            state.archiveTimer = 0;
+            toast(job.state === 'done' ? 'Archive extracted' : ('extract: ' + (job.error || 'failed')),
+              job.state === 'done' ? 'ok' : 'err');
+            if (job.state === 'done') refresh();
+            state.jobHideTimer = setTimeout(() => {
+              state.jobHideTimer = 0;
+              cancel.disabled = false;
+              if (!state.uploadBusy && !state.jobTimer && !state.archiveTimer) {
+                box.classList.remove('show');
+              }
+            }, 2800);
+          }
+        } catch (err) {
+          missed++;
+          text.textContent = 'Waiting for archive status...';
+          if (missed >= 120) {
+            clearInterval(state.archiveTimer);
+            state.archiveTimer = 0;
+            cancel.disabled = false;
+            box.classList.remove('show');
+            toast('archive status: ' + err.message, 'err');
+          }
+        }
+      }
+
+      tick();
+      state.archiveTimer = setInterval(tick, 1000);
     }
 
     function detailRow(label, value) {
@@ -1467,6 +1599,38 @@
       window.open(fileUrl(joinPath(state.path, entries[0].name)), '_blank');
     }
 
+    async function extractSelected() {
+      const entries = selectedEntries();
+      if (entries.length !== 1 || entries[0].dir) {
+        toast('Select one archive file', 'err');
+        return;
+      }
+      if (!isArchiveName(entries[0].name)) {
+        toast('Supported archives: rar, 7z, 7z.001, zip', 'err');
+        return;
+      }
+
+      const source = joinPath(state.path, entries[0].name);
+      const suggested = joinPath(state.path, archiveStem(entries[0].name));
+      const destination = cleanPath(prompt('Extract to folder', suggested) || '');
+      if (!destination || destination === '/') return;
+      const password = prompt('Archive password (leave blank if none)', '');
+      if (password === null) return;
+
+      try {
+        await postForm('/api/fs/archive/prepare', {
+          src: source,
+          dst: destination,
+          password,
+          threads: '0'
+        });
+        toast('Archive extraction started', 'ok');
+        pollArchiveStatus();
+      } catch (err) {
+        toast('extract: ' + err.message, 'err');
+      }
+    }
+
     async function deleteSelected() {
       const paths = selectedPaths();
       if (!paths.length) {
@@ -1598,6 +1762,7 @@
         state.jobHideTimer = 0;
       }
       box.classList.add('show');
+      el('job-cancel').disabled = false;
       text.textContent = 'Starting';
       let missed = 0;
 
@@ -1657,6 +1822,7 @@
       el('new-folder').addEventListener('click', makeFolder);
       el('rename').addEventListener('click', renameOne);
       el('download').addEventListener('click', downloadSelected);
+      el('extract').addEventListener('click', extractSelected);
       el('delete').addEventListener('click', deleteSelected);
       el('copy').addEventListener('click', () => transfer('copy'));
       el('move').addEventListener('click', () => transfer('move'));
@@ -1668,6 +1834,10 @@
       });
       el('target-path').addEventListener('input', updatePlaces);
       el('job-cancel').addEventListener('click', () => {
+        if (state.archiveTimer) {
+          toast('Archive extraction cannot be cancelled yet', 'err');
+          return;
+        }
         if (state.uploadBusy) {
           state.uploadAbort = true;
           if (state.uploadXhr) state.uploadXhr.abort();
@@ -1712,6 +1882,11 @@
 
       api('/api/fs/job/status').then((job) => {
         if (job.busy) pollJob();
+      }).catch(() => {});
+      api('/api/fs/archive/status').then((job) => {
+        if (job.state === 'prepared' || job.state === 'running' || job.state === 'finalizing') {
+          pollArchiveStatus();
+        }
       }).catch(() => {});
     }
 

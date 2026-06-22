@@ -41,10 +41,10 @@ payload if you want the tile.
 
 ## Usage
 
-Inject the file manager payload to your loader, usually on port `9021`:
+Inject the file manager payload to your loader, usually on port `9021`, or use some other payload sender like my ItsBlurf/blurfer:
 
 ```sh
-python3 payload_sender.py 192.168.1.204 9021 bfpilot.elf
+python3 payload_sender.py 192.168.xx.xx 9021 bfpilot.elf
 ```
 
 Open:

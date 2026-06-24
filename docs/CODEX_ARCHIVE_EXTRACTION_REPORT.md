@@ -4,29 +4,17 @@ Date: 2026-06-19
 
 ## Current Implementation
 
-BFpilot now uses a built-in archive daemon:
+BFpilot keeps archive extraction in a separate payload:
 
-- `bfpilot.elf` starts the HTTP file manager and forks one archive daemon child
-  before the threaded web server begins accepting requests.
-- `/api/fs/archive/prepare` writes a job and marks it `prepared`.
-- The daemon watches `/data/bfpilot/archive/status.json`, picks up prepared
-  jobs, extracts them, and writes progress.
-- `bfpilot-archive-worker.elf` remains available only as a diagnostic fallback.
+- `bfpilot.elf` prepares archive jobs and exposes `/api/fs/archive/*`.
+- `bfpilot-archive-worker.elf` performs extraction and writes progress.
 - Jobs live under `/data/bfpilot/archive/`.
 - Extraction is restricted to `/data`, `/mnt/usb0..7`, and `/mnt/ext0..7`.
 - Output is staged in `*.bfpilot-extracting-*` and renamed to the final
   destination only after success.
 
-This design keeps extraction standalone for users without forking from a
-threaded request handler.
-
-Intermediate designs rejected during live testing:
-
-- Detached pthread extraction froze the web process after `/api/fs/archive/prepare`.
-- Request-time fork kept the web server alive, but the child hung in ZIP
-  extraction, consistent with forking after threaded libc/C++ state existed.
-- The daemon-child approach passed the live ZIP extraction test because the
-  child is forked before the HTTP server creates request threads.
+This split keeps the file manager payload compatibility-focused and keeps the
+archive engines out of the always-loaded main ELF.
 
 ## Supported Formats
 
@@ -196,7 +184,7 @@ ZIP and ZipCrypto ZIP were validated earlier in the same live session:
 - `bfpilot-enc.zip` with password `codextest`: extracted successfully after
   fixing the ZipCrypto key update path.
 
-Standalone daemon ZIP smoke:
+Standalone worker ZIP smoke:
 
 ```sh
 python3 payload_sender.py 192.168.1.204 9021 bfpilot.elf
@@ -207,8 +195,8 @@ GET /api/fs/archive/status
 GET /fs/data/test/bfpilot-daemon-archive-20260619T214803Z/out/dir/hello.txt
 ```
 
-Result on temporary port `5907`: passed without injecting
-`bfpilot-archive-worker.elf`. Final status was `state=done`,
+Result on temporary port `5907`: passed with `bfpilot-archive-worker.elf`
+injected. Final status was `state=done`,
 `archiveType=zip`, `archiveExitCode=0`, `bytesWritten=11520`,
 `totalFiles=2`, `elapsedMs=68`, `averageMBps=0.16`. The extracted file matched
 the uploaded test content and `/api/status` still responded from server
@@ -221,8 +209,8 @@ PS5_PAYLOAD_SDK=/home/blurf/PS5/ps5-payload-sdk make all inspect-imports
 PS5_IP=192.168.1.204 BF_WEB_PORT=5907 make ps5-diag
 ```
 
-Result: passed. The live integrated daemon endpoint still reported
-`requiresInjection=false`, `/api/fs/archive/status` still reported the completed
+Result: passed. The live archive worker endpoint reported
+`requiresInjection=true`, `/api/fs/archive/status` still reported the completed
 ZIP extraction above, and `make ps5-diag` saved
 `diagnostics/ps5-diag-20260619T215312Z.json`.
 

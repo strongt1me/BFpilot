@@ -24,7 +24,6 @@
 #include "boot_marker.h"
 #include "diag.h"
 #include "notify.h"
-#include "archive_worker.h"
 #include "transfer.h"
 #include "version.h"
 #include "websrv.h"
@@ -330,7 +329,8 @@ main(int argc, char **argv) {
   puts("");
   puts("  active: standalone web file manager");
   printf("  mode: %s\n", BFPILOT_BUILD_MODE);
-  puts("  scope: browse, upload, download, copy, move, delete, rename, mkdir, extract");
+  puts("  scope: browse, upload, download, copy, move, delete, rename, mkdir");
+  puts("  archive: prepare jobs only; inject bfpilot-archive-worker.elf to extract");
   puts("  ps5 app: launcher installer is a separate optional payload");
   printf("  web ui: http://%s:%u/\n", ready.ip, (unsigned int)ready.port);
   puts("  inject/deploy port: 9021");

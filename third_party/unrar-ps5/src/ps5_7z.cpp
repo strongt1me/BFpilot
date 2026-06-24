@@ -668,15 +668,12 @@ static void Set7zProperties(IInArchive *Archive,uint Threads)
   if (!SetProperties)
     return;
 
-  if (Threads>0)
-  {
-    UInt32 Clamped=std::min<uint>(std::max<uint>(Threads,1),8);
-    const wchar_t *Names[2]={ L"mt", L"mtf" };
-    NCOM::CPropVariant Values[2];
-    Values[0]=(UInt32)Clamped;
-    Values[1]=true;
-    SetProperties->SetProperties(Names,Values,2);
-  }
+  (void)Threads;
+  const wchar_t *Names[2]={ L"mt", L"mtf" };
+  NCOM::CPropVariant Values[2];
+  Values[0]=(UInt32)1;
+  Values[1]=false;
+  SetProperties->SetProperties(Names,Values,2);
 }
 
 SevenZExtractResult Run7zExtract(const std::string &ArchivePath,

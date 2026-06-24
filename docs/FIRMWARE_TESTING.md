@@ -140,9 +140,9 @@ curl "http://$PS5_IP:${BF_WEB_PORT:-5905}/api/fs/archive/status"
 Expected endpoints:
 
 - `/api/fs/archive/support`: HTTP 200 with supported formats and limitations.
-- `/api/fs/archive/support`: `requiresInjection=false` for the normal
-  integrated daemon path.
-- `/api/fs/archive/status`: briefly `state=prepared` while the daemon picks up
+- `/api/fs/archive/support`: `requiresInjection=true` for the normal worker
+  path.
+- `/api/fs/archive/status`: briefly `state=prepared` while the worker picks up
   the job.
 - `/api/fs/archive/status`: `state=done`, `percent=100`, and
   `archiveExitCode=0` after successful extraction.
@@ -167,10 +167,8 @@ Do not share `/data/bfpilot/archive/job.ini` if a password was used. It is a
 local job handoff file and can contain the archive password until another job is
 prepared.
 
-Fallback: `bfpilot-archive-worker.elf` still exists for diagnostics. Use it only
-if `/api/fs/archive/support` unexpectedly reports `requiresInjection=true`, or
-if you are intentionally comparing the standalone daemon against the old worker
-path.
+Fallback: `bfpilot-archive-worker.elf` is the extraction payload. Use it for
+archive jobs and diagnostics.
 
 ## 6. Launcher Installer
 

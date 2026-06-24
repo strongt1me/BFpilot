@@ -474,6 +474,11 @@ LoadConfig(ArchiveConfig &cfg, std::string &error) {
     error = "archive job is missing source or destination";
     return false;
   }
+  if(cfg.threads > 1) {
+    LogLine("requested threads=%u clamped to 1 for PS5 stability",
+            cfg.threads);
+  }
+  cfg.threads = 1;
   return true;
 }
 
@@ -581,7 +586,7 @@ static int
 RunUnrarExtract(const std::string &archive_path, const std::string &dest_path,
                 const std::string &password, unsigned threads) {
   ErrHandler.Clean();
-  ErrHandler.SetSignalHandlers(true);
+  ErrHandler.SetSignalHandlers(false);
 
   std::unique_ptr<CommandData> cmd(new CommandData);
   cmd->Command = L"X";

@@ -21,7 +21,6 @@
 #include <unistd.h>
 
 #include "diag.h"
-#include "archive_worker.h"
 #include "transfer.h"
 #include "websrv.h"
 
@@ -1966,7 +1965,7 @@ archive_busy_claimed:
               src, dst, password[0] ? "provided" : "empty");
 
 #if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
-  bfpilot_log("archive integrated daemon job queued");
+  bfpilot_log("archive integrated worker job queued");
 #endif
 
   json_buf_t res = {0};

@@ -14,7 +14,6 @@ Main release payload. Test this first on every firmware and loader.
 - Does not include integrated launcher installer source.
 - Does not link AppInstUtil.
 - Does not depend on SystemService, UserService, AppInstUtil, or `kernel_sys`.
-- Starts an archive daemon child before the threaded HTTP server starts.
 - Writes boot/runtime/crash diagnostics under `/data/BFpilot`.
 
 Broad firmware support comes from avoiding imports that can fail before
@@ -40,11 +39,10 @@ The tile target is:
 http://127.0.0.1:5905/
 ```
 
-### Integrated Archive Daemon
+### Archive Worker
 
-Normal archive extraction is handled by `bfpilot.elf` itself. At startup the
-payload forks one daemon child before the web server begins accepting threaded
-HTTP requests.
+Archive extraction is handled by the separate `bfpilot-archive-worker.elf`
+payload.
 
 - Reads `/data/bfpilot/archive/job.ini`.
 - Writes `/data/bfpilot/archive/status.json`.
@@ -55,10 +53,7 @@ HTTP requests.
   successful extraction.
 - Does not link AppInstUtil or launcher installer libraries.
 - Uses `/data/bfpilot/archive/daemon.lock` so repeated payload injections do
-  not create competing archive daemons.
-
-The separate `bfpilot-archive-worker.elf` remains as a diagnostic fallback. It
-is not required for normal extraction.
+  not create competing archive workers.
 
 ## Why The Split Exists
 
@@ -71,8 +66,8 @@ approaches are unreliable:
 - Loading AppInst without the matching service/authid context can fail before a
   useful install result is produced.
 
-BFpilot keeps launcher risk out of the file manager. If the installer fails,
-the file manager payload remains compatible and usable.
+BFpilot keeps launcher and archive risk out of the file manager. If either
+helper payload fails, the file manager payload remains compatible and usable.
 
 ## Boot Marker
 

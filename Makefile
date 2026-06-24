@@ -21,7 +21,7 @@ PS5_PORT ?= 9021
 PYTHON ?= python3
 WEB_PORT ?= 5905
 
-VERSION_TAG := bfpilot-v0.3.1-test4
+VERSION_TAG := bfpilot-v0.3.1-test5
 BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 LLVM_BINDIR ?= $(shell dirname "$$(command -v clang 2>/dev/null || command -v clang.exe 2>/dev/null || command -v llvm-strip 2>/dev/null || command -v llvm-strip.exe 2>/dev/null || echo clang)" 2>/dev/null || echo .)
@@ -117,8 +117,7 @@ BFPILOT_OBJS := $(patsubst %.c,build/bfpilot/%.o,$(WEB_SRCS) $(GEN_SRCS))
 LAUNCHER_INSTALLER_OBJS := $(patsubst %.c,build/launcher-installer/%.o,$(LAUNCHER_INSTALLER_SRCS))
 ARCHIVE_WORKER_OBJS := $(patsubst %.cpp,build/archive-worker/%.o,$(ARCHIVE_WORKER_SRCS) $(ARCHIVE_UNRAR_SRCS) $(ARCHIVE_SEVENZ_CPP_SRCS))
 ARCHIVE_WORKER_OBJS += $(patsubst %.c,build/archive-worker/%.o,$(ARCHIVE_SEVENZ_C_SRCS))
-BFPILOT_ARCHIVE_OBJS := $(patsubst %.cpp,build/bfpilot-archive/%.o,$(ARCHIVE_WORKER_SRCS) $(ARCHIVE_UNRAR_SRCS) $(ARCHIVE_SEVENZ_CPP_SRCS))
-BFPILOT_ARCHIVE_OBJS += $(patsubst %.c,build/bfpilot-archive/%.o,$(ARCHIVE_SEVENZ_C_SRCS))
+BFPILOT_ARCHIVE_OBJS :=
 
 COMMON_CFLAGS := -Os -Wall -Werror -Isrc
 COMMON_CFLAGS += -ffunction-sections -fdata-sections -flto
@@ -133,7 +132,7 @@ BFPILOT_CFLAGS += -DBFPILOT_WEB_PORT=$(WEB_PORT)
 BFPILOT_CFLAGS += -DBFPILOT_DEBUG_NOTIFICATIONS=0
 BFPILOT_CFLAGS += -DBFPILOT_ENABLE_LAUNCHER=0
 BFPILOT_CFLAGS += -DBFPILOT_DISABLE_LAUNCHER=1
-BFPILOT_CFLAGS += -DBFPILOT_ENABLE_INTEGRATED_ARCHIVE=1
+BFPILOT_CFLAGS += -DBFPILOT_ENABLE_INTEGRATED_ARCHIVE=0
 
 LAUNCHER_INSTALLER_CFLAGS := $(COMMON_CFLAGS)
 LAUNCHER_INSTALLER_CFLAGS += -DBFPILOT_PAYLOAD_NAME=\"bfpilot-launcher-installer\"
@@ -143,7 +142,7 @@ COMMON_LDFLAGS := -Wl,--gc-sections -flto
 PRIVILEGED_APPINST_LDLIBS := -lkernel_sys -lSceSystemService
 PRIVILEGED_APPINST_LDLIBS += -lSceUserService -lSceAppInstUtil
 ARCHIVE_WORKER_DEFINES := -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_UNIX
-ARCHIVE_WORKER_DEFINES += -DRAR_SMP -DPS5_PAYLOAD -DSILENT
+ARCHIVE_WORKER_DEFINES += -DPS5_PAYLOAD -DSILENT
 ARCHIVE_SEVENZ_DEFINES := -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_UNIX
 ARCHIVE_SEVENZ_DEFINES += -DZ7_EXTRACT_ONLY -DZ7_PROG_VARIANT_R -DZ7_AFFINITY_DISABLE
 ARCHIVE_WORKER_INCLUDES := -I$(UNRAR_SRC_DIR) -I$(MINIZ_DIR)

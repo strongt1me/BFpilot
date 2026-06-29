@@ -70,6 +70,9 @@ Expected:
   mounted
 - the top storage summary shows free/total/used percentage for Data and each
   mounted drive
+- if PS5 Settings and BFpilot disagree on free space, compare `/api/fs/places`
+  fields directly: `availableBytes` is user-usable free space, `freeBytes` is
+  raw filesystem free space, and `reservedBytes` is the gap between them
 - custom shortcuts can be added, renamed, removed, and survive reload because
   they are stored at `/data/BFpilot/shortcuts.txt`
 
@@ -79,7 +82,39 @@ Failure meaning:
 - No disk space: `statvfs`/places response regression.
 - Shortcuts do not persist: `/data/BFpilot/shortcuts.txt` write/read failure.
 
-## 4. Safe Transfer Benchmark
+## 4. Storage Mismatch Audit
+
+When PS5 Settings and BFpilot disagree on free space, run the read-only storage
+audit before deleting or moving anything:
+
+```sh
+PS5_IP="$PS5_IP" BF_WEB_PORT="${BF_WEB_PORT:-5905}" make ps5-storage-audit
+PS5_IP="$PS5_IP" BF_WEB_PORT="${BF_WEB_PORT:-5905}" \
+python3 scripts/ps5_storage_audit.py --deep --settings-free-gb 18
+```
+
+The audit saves `diagnostics/ps5-storage-audit-*.json`, records `/api/fs/places`
+and `/api/fs/stat` totals, lists the main storage roots, and recursively sizes
+common candidates such as `/data/homebrew`, `/data/etaHEN`, `/data/shadowmount`,
+`/user/app`, `/user/appmeta`, and immediate `/data/*` entries. It uses only GET
+requests.
+
+Do not add `/mnt/shadowmnt` to totals by default. Those paths are mounted views
+and can double-count the same backing files. Use `--include-shadowmnt` only when
+you want to inspect the mounted view separately.
+
+Failure meaning:
+
+- `availableBytes` near PS5 Settings free space: BFpilot UI was previously
+  showing raw free or the wrong field.
+- `freeBytes` much higher than `availableBytes`: filesystem reserved/quota space
+  explains at least part of the gap.
+- `du` totals far below `usableUsedBytes`: hidden, inaccessible, deleted-open,
+  database-accounted, or system-reserved data still needs live investigation.
+- a large `/data/*`, `/user/app`, `/user/data`, or shadowmount source folder:
+  inspect that path before deleting anything.
+
+## 5. Safe Transfer Benchmark
 
 Run only after the file manager passes:
 
@@ -133,42 +168,51 @@ curl -X POST "http://$PS5_IP:${BF_WEB_PORT:-5905}/api/fs/archive/prepare" \
   --data-urlencode "src=/data/test/example.7z" \
   --data-urlencode "dst=/data/test/bfpilot-example-out" \
   --data-urlencode "password=" \
-  --data-urlencode "threads=1"
+  --data-urlencode "threads=0"
 curl "http://$PS5_IP:${BF_WEB_PORT:-5905}/api/fs/archive/status"
 ```
+
+Use `threads=0` for the default automatic archive-engine setting. For
+performance diagnostics, repeat only BFpilot-owned test archives with
+`threads=1`, `threads=2`, `threads=4`, and `threads=8`, then compare the
+reported `averageMBps` and elapsed time.
 
 Expected endpoints:
 
 - `/api/fs/archive/support`: HTTP 200 with supported formats and limitations.
-- `/api/fs/archive/support`: `requiresInjection=true` for the normal worker
-  path.
-- `/api/fs/archive/status`: briefly `state=prepared` while the worker picks up
-  the job.
+- `/api/fs/archive/support`: `requiresInjection=false` for the integrated
+  archive path.
+- `/api/fs/archive/status`: briefly `state=prepared` while the integrated
+  daemon picks up the job.
 - `/api/fs/archive/status`: `state=done`, `percent=100`, and
   `archiveExitCode=0` after successful extraction.
 
 Expected files:
 
-- `/data/bfpilot/archive/status.json`
-- `/data/bfpilot/archive/archive-worker.log`
+- `/data/BFpilot/archive-integrated/status.json`
+- `/data/BFpilot/archive-integrated/archive-worker.log`
 - the requested destination directory only after finalization succeeds
 
 Expected failure diagnostics:
 
 - `7z password required`: retry with the correct password.
-- `bad 7z password or extraction aborted`: password was supplied but rejected.
-- `RAR password required or next multipart volume is missing`: retry with the
-  password or place all RAR volumes next to the first archive.
+- `bad 7z password or encrypted-header open error`: password was supplied but
+  rejected, including encrypted-header 7z files.
+- `bad RAR password or checksum error`: password was supplied but rejected.
+- `RAR password required or archive checksum error`: retry with the password.
+- Multipart RAR extraction failures can also mean a required volume is missing;
+  place all RAR volumes next to the first archive.
 - `zip AES encryption is not supported yet`: use a non-AES ZIP, RAR, or 7z.
 - `unsafe zip member path`: archive contains absolute or parent-directory
   paths and is intentionally refused.
 
-Do not share `/data/bfpilot/archive/job.ini` if a password was used. It is a
-local job handoff file and can contain the archive password until another job is
-prepared.
+Do not share `/data/BFpilot/archive-integrated/job.ini` if a password was used.
+It is a local job handoff file and can contain the archive password until
+another job is prepared.
 
-Fallback: `bfpilot-archive-worker.elf` is the extraction payload. Use it for
-archive jobs and diagnostics.
+Fallback: `bfpilot-archive-worker.elf` is a standalone diagnostic build of the
+archive engine. Normal archive extraction should work from `bfpilot.elf`
+without a second payload injection.
 
 ## 6. Launcher Installer
 
@@ -213,8 +257,10 @@ For every failure, save:
 /data/BFpilot/log.txt
 /data/BFpilot/crash.log
 /data/BFpilot/launcher-installer.log
-/data/bfpilot/archive/status.json
-/data/bfpilot/archive/archive-worker.log
+/data/BFpilot/archive-integrated/status.json
+/data/BFpilot/archive-integrated/archive-worker.log
+/data/BFpilot/archive/status.json
+/data/BFpilot/archive/archive-worker.log
 diagnostics/ps5-diag-*.json
 ```
 

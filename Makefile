@@ -3,7 +3,7 @@
 SHELL := bash
 
 ifeq ($(strip $(PS5_PAYLOAD_SDK)),)
-ifeq ($(filter ps5-diag ps5-smoke,$(MAKECMDGOALS)),)
+ifeq ($(filter ps5-diag ps5-smoke ps5-storage-audit,$(MAKECMDGOALS)),)
 $(error PS5_PAYLOAD_SDK is required, e.g. export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk)
 endif
 else
@@ -21,11 +21,11 @@ PS5_PORT ?= 9021
 PYTHON ?= python3
 WEB_PORT ?= 5905
 
-VERSION_TAG := bfpilot-v0.3.1-test5
+VERSION_TAG := bfpilot-v0.3.1-test6
 BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-LLVM_BINDIR ?= $(shell dirname "$$(command -v clang 2>/dev/null || command -v clang.exe 2>/dev/null || command -v llvm-strip 2>/dev/null || command -v llvm-strip.exe 2>/dev/null || echo clang)" 2>/dev/null || echo .)
-LLVM_CONFIG ?= $(CURDIR)/build-tools/llvm-config
+LLVM_CONFIG ?= $(if $(wildcard $(PS5_PAYLOAD_SDK)/bin/prospero-llvm-config),$(PS5_PAYLOAD_SDK)/bin/prospero-llvm-config,$(CURDIR)/build-tools/llvm-config)
+LLVM_BINDIR ?= $(shell "$(LLVM_CONFIG)" --bindir 2>/dev/null || dirname "$$(command -v clang 2>/dev/null || command -v clang.exe 2>/dev/null || command -v llvm-strip 2>/dev/null || command -v llvm-strip.exe 2>/dev/null || echo clang)" 2>/dev/null || echo .)
 export LLVM_BINDIR
 export LLVM_CONFIG
 
@@ -117,7 +117,8 @@ BFPILOT_OBJS := $(patsubst %.c,build/bfpilot/%.o,$(WEB_SRCS) $(GEN_SRCS))
 LAUNCHER_INSTALLER_OBJS := $(patsubst %.c,build/launcher-installer/%.o,$(LAUNCHER_INSTALLER_SRCS))
 ARCHIVE_WORKER_OBJS := $(patsubst %.cpp,build/archive-worker/%.o,$(ARCHIVE_WORKER_SRCS) $(ARCHIVE_UNRAR_SRCS) $(ARCHIVE_SEVENZ_CPP_SRCS))
 ARCHIVE_WORKER_OBJS += $(patsubst %.c,build/archive-worker/%.o,$(ARCHIVE_SEVENZ_C_SRCS))
-BFPILOT_ARCHIVE_OBJS :=
+BFPILOT_ARCHIVE_OBJS := $(patsubst %.cpp,build/bfpilot-archive/%.o,$(ARCHIVE_WORKER_SRCS) $(ARCHIVE_UNRAR_SRCS) $(ARCHIVE_SEVENZ_CPP_SRCS))
+BFPILOT_ARCHIVE_OBJS += $(patsubst %.c,build/bfpilot-archive/%.o,$(ARCHIVE_SEVENZ_C_SRCS))
 
 COMMON_CFLAGS := -Os -Wall -Werror -Isrc
 COMMON_CFLAGS += -ffunction-sections -fdata-sections -flto
@@ -132,7 +133,7 @@ BFPILOT_CFLAGS += -DBFPILOT_WEB_PORT=$(WEB_PORT)
 BFPILOT_CFLAGS += -DBFPILOT_DEBUG_NOTIFICATIONS=0
 BFPILOT_CFLAGS += -DBFPILOT_ENABLE_LAUNCHER=0
 BFPILOT_CFLAGS += -DBFPILOT_DISABLE_LAUNCHER=1
-BFPILOT_CFLAGS += -DBFPILOT_ENABLE_INTEGRATED_ARCHIVE=0
+BFPILOT_CFLAGS += -DBFPILOT_ENABLE_INTEGRATED_ARCHIVE=1
 
 LAUNCHER_INSTALLER_CFLAGS := $(COMMON_CFLAGS)
 LAUNCHER_INSTALLER_CFLAGS += -DBFPILOT_PAYLOAD_NAME=\"bfpilot-launcher-installer\"
@@ -221,11 +222,11 @@ build/archive-worker/%.o: %.c Makefile
 
 build/bfpilot-archive/%.o: %.cpp Makefile
 	$(call run,mkdir -p $(dir $@))
-	$(call run,$(CXX_CMD) $(ARCHIVE_WORKER_CXXFLAGS) $(ARCHIVE_WORKER_DEFINES) $(ARCHIVE_SEVENZ_DEFINES) $(ARCHIVE_WORKER_INCLUDES) -DUNRAR -DBFPILOT_ARCHIVE_NO_MAIN -c $< -o $@)
+	$(call run,$(CXX_CMD) $(ARCHIVE_WORKER_CXXFLAGS) $(ARCHIVE_WORKER_DEFINES) $(ARCHIVE_SEVENZ_DEFINES) $(ARCHIVE_WORKER_INCLUDES) -DUNRAR -DBFPILOT_ARCHIVE_NO_MAIN -DBFPILOT_ARCHIVE_INTEGRATED=1 -c $< -o $@)
 
 build/bfpilot-archive/%.o: %.c Makefile
 	$(call run,mkdir -p $(dir $@))
-	$(call run,$(CC_CMD) $(ARCHIVE_WORKER_CFLAGS) $(ARCHIVE_WORKER_DEFINES) $(ARCHIVE_SEVENZ_DEFINES) $(ARCHIVE_WORKER_INCLUDES) -c $< -o $@)
+	$(call run,$(CC_CMD) $(ARCHIVE_WORKER_CFLAGS) $(ARCHIVE_WORKER_DEFINES) $(ARCHIVE_SEVENZ_DEFINES) $(ARCHIVE_WORKER_INCLUDES) -DBFPILOT_ARCHIVE_INTEGRATED=1 -c $< -o $@)
 
 ifeq ($(HOST_IS_WINDOWS),1)
 $(BFPILOT_BIN): $(BFPILOT_OBJS) $(BFPILOT_ARCHIVE_OBJS)
@@ -270,8 +271,11 @@ ps5-diag:
 ps5-smoke:
 	$(call run,$(PYTHON) scripts/ps5_smoke.py)
 
+ps5-storage-audit:
+	$(call run,$(PYTHON) scripts/ps5_storage_audit.py)
+
 clean:
 	$(call run,rm -rf $(BFPILOT_BIN) $(LAUNCHER_INSTALLER_BIN) $(ARCHIVE_WORKER_BIN) build gen)
 
 .SECONDARY: $(GEN_SRCS)
-.PHONY: all bfpilot launcher-installer archive-worker inspect-imports clean deploy-bfpilot deploy-launcher-installer ps5-diag ps5-smoke
+.PHONY: all bfpilot launcher-installer archive-worker inspect-imports clean deploy-bfpilot deploy-launcher-installer ps5-diag ps5-smoke ps5-storage-audit

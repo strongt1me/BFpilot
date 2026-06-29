@@ -36,15 +36,21 @@
 #define BFPILOT_SHORTCUTS_PATH "/data/BFpilot/shortcuts.txt"
 #define BFPILOT_SHORTCUTS_TMP "/data/BFpilot/shortcuts.tmp"
 #define BFPILOT_MAX_SHORTCUTS 32
-#define BFPILOT_ARCHIVE_DIR "/data/bfpilot/archive"
-#define BFPILOT_ARCHIVE_JOB BFPILOT_ARCHIVE_DIR "/job.ini"
-#define BFPILOT_ARCHIVE_JOB_TMP BFPILOT_ARCHIVE_DIR "/job.tmp"
-#define BFPILOT_ARCHIVE_STATUS BFPILOT_ARCHIVE_DIR "/status.json"
-#define BFPILOT_ARCHIVE_STATUS_TMP BFPILOT_ARCHIVE_DIR "/status.tmp"
 
 #ifndef BFPILOT_ENABLE_INTEGRATED_ARCHIVE
 #define BFPILOT_ENABLE_INTEGRATED_ARCHIVE 0
 #endif
+
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive-integrated"
+#else
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive"
+#endif
+#define BFPILOT_ARCHIVE_JOB BFPILOT_ARCHIVE_DIR "/job.ini"
+#define BFPILOT_ARCHIVE_JOB_TMP BFPILOT_ARCHIVE_DIR "/job.tmp"
+#define BFPILOT_ARCHIVE_STATUS BFPILOT_ARCHIVE_DIR "/status.json"
+#define BFPILOT_ARCHIVE_STATUS_TMP BFPILOT_ARCHIVE_DIR "/status.tmp"
+#define BFPILOT_ARCHIVE_MAX_THREADS 8U
 
 
 typedef struct json_buf {
@@ -901,10 +907,21 @@ list_request(const http_request_t *req) {
 }
 
 
+typedef struct fs_total_info {
+  int ok;
+  unsigned long long total;
+  unsigned long long free_bytes;
+  unsigned long long available;
+  unsigned long long reserved;
+  unsigned long long used;
+  unsigned long long usable_total;
+  unsigned long long usable_used;
+  double used_pct;
+  double usable_used_pct;
+} fs_total_info_t;
+
 static void
-fs_totals(const char *path, int *ok, unsigned long long *total,
-          unsigned long long *free_bytes, unsigned long long *avail,
-          unsigned long long *used, double *used_pct);
+fs_totals(const char *path, fs_total_info_t *info);
 
 
 static int
@@ -918,21 +935,23 @@ stat_request(const http_request_t *req) {
   if(lstat(path, &st) != 0) return serve_error(req, 404, strerror(errno));
 
   json_buf_t b = {0};
-  int fs_ok = 0;
-  unsigned long long total = 0, free_bytes = 0, avail = 0, used = 0;
-  double used_pct = 0.0;
-  fs_totals(path, &fs_ok, &total, &free_bytes, &avail, &used, &used_pct);
+  fs_total_info_t fs = {0};
+  fs_totals(path, &fs);
   if(json_append(&b, "{\"ok\":true,\"path\":") != 0 ||
      json_string(&b, path) != 0 ||
      json_appendf(&b,
                   ",\"dir\":%s,\"size\":%ld,\"mtime\":%ld,\"dev\":%lu,"
                   "\"statvfs\":%s,\"totalBytes\":%llu,\"freeBytes\":%llu,"
-                  "\"availableBytes\":%llu,\"usedBytes\":%llu,"
-                  "\"usedPercent\":%.2f}",
+                  "\"availableBytes\":%llu,\"reservedBytes\":%llu,"
+                  "\"usedBytes\":%llu,\"usedPercent\":%.2f,"
+                  "\"usableTotalBytes\":%llu,\"usableUsedBytes\":%llu,"
+                  "\"usableUsedPercent\":%.2f}",
                   S_ISDIR(st.st_mode) ? "true" : "false",
                   (long)st.st_size, (long)st.st_mtime,
-                  (unsigned long)st.st_dev, fs_ok ? "true" : "false",
-                  total, free_bytes, avail, used, used_pct) != 0) {
+                  (unsigned long)st.st_dev, fs.ok ? "true" : "false",
+                  fs.total, fs.free_bytes, fs.available, fs.reserved,
+                  fs.used, fs.used_pct, fs.usable_total, fs.usable_used,
+                  fs.usable_used_pct) != 0) {
     free(b.data);
     return -1;
   }
@@ -1082,25 +1101,35 @@ write_shortcuts(const shortcut_entry_t *items, int count) {
 
 
 static void
-fs_totals(const char *path, int *ok, unsigned long long *total,
-          unsigned long long *free_bytes, unsigned long long *avail,
-          unsigned long long *used, double *used_pct) {
+fs_totals(const char *path, fs_total_info_t *info) {
   struct statvfs vfs;
-  *ok = 0;
-  *total = 0;
-  *free_bytes = 0;
-  *avail = 0;
-  *used = 0;
-  *used_pct = 0.0;
+  memset(info, 0, sizeof(*info));
   if(statvfs(path, &vfs) != 0) return;
 
   unsigned long long block = vfs.f_frsize ? vfs.f_frsize : vfs.f_bsize;
-  *total = (unsigned long long)vfs.f_blocks * block;
-  *free_bytes = (unsigned long long)vfs.f_bfree * block;
-  *avail = (unsigned long long)vfs.f_bavail * block;
-  *used = *total > *free_bytes ? *total - *free_bytes : 0;
-  *used_pct = *total > 0 ? ((double)*used * 100.0) / (double)*total : 0.0;
-  *ok = 1;
+  info->total = (unsigned long long)vfs.f_blocks * block;
+  info->free_bytes = (unsigned long long)vfs.f_bfree * block;
+  info->available = (unsigned long long)vfs.f_bavail * block;
+  info->reserved = info->free_bytes > info->available
+                       ? info->free_bytes - info->available
+                       : 0;
+  info->used = info->total > info->free_bytes
+                   ? info->total - info->free_bytes
+                   : 0;
+  info->usable_total = info->total > info->reserved
+                           ? info->total - info->reserved
+                           : info->total;
+  info->usable_used = info->usable_total > info->available
+                          ? info->usable_total - info->available
+                          : 0;
+  info->used_pct = info->total > 0
+                       ? ((double)info->used * 100.0) / (double)info->total
+                       : 0.0;
+  info->usable_used_pct =
+      info->usable_total > 0
+          ? ((double)info->usable_used * 100.0) / (double)info->usable_total
+          : 0.0;
+  info->ok = 1;
 }
 
 
@@ -1114,10 +1143,8 @@ append_fs_place(json_buf_t *b, int *first, const char *label,
   if(!*first && json_append(b, ",") != 0) return -1;
   *first = 0;
 
-  int fs_ok = 0;
-  unsigned long long total = 0, free_bytes = 0, avail = 0, used = 0;
-  double used_pct = 0.0;
-  fs_totals(path, &fs_ok, &total, &free_bytes, &avail, &used, &used_pct);
+  fs_total_info_t fs = {0};
+  fs_totals(path, &fs);
 
   if(json_append(b, "{\"label\":") != 0 ||
      json_string(b, label && label[0] ? label : safe_basename_label(path)) != 0 ||
@@ -1128,12 +1155,16 @@ append_fs_place(json_buf_t *b, int *first, const char *label,
      json_appendf(b,
                   ",\"custom\":%s,\"mounted\":%s,\"dev\":%lu,"
                   "\"statvfs\":%s,\"totalBytes\":%llu,\"freeBytes\":%llu,"
-                  "\"availableBytes\":%llu,\"usedBytes\":%llu,"
-                  "\"usedPercent\":%.2f,"
+                  "\"availableBytes\":%llu,\"reservedBytes\":%llu,"
+                  "\"usedBytes\":%llu,\"usedPercent\":%.2f,"
+                  "\"usableTotalBytes\":%llu,\"usableUsedBytes\":%llu,"
+                  "\"usableUsedPercent\":%.2f,"
                   "\"writable\":null,\"writeProbe\":\"skipped-read-only\"}",
                   custom ? "true" : "false", mounted ? "true" : "false",
-                  (unsigned long)st.st_dev, fs_ok ? "true" : "false",
-                  total, free_bytes, avail, used, used_pct) != 0) {
+                  (unsigned long)st.st_dev, fs.ok ? "true" : "false",
+                  fs.total, fs.free_bytes, fs.available, fs.reserved,
+                  fs.used, fs.used_pct, fs.usable_total, fs.usable_used,
+                  fs.usable_used_pct) != 0) {
     return -1;
   }
   return 0;
@@ -1713,8 +1744,21 @@ write_text_atomic(const char *tmp_path, const char *final_path,
 }
 
 
+static unsigned
+archive_normalize_threads_text(const char *threads) {
+  if(!threads || !*threads) return 0;
+  for(const unsigned char *p = (const unsigned char *)threads; *p; p++) {
+    if(*p < '0' || *p > '9') return 0;
+  }
+  unsigned long value = strtoul(threads, NULL, 10);
+  if(value > BFPILOT_ARCHIVE_MAX_THREADS) value = BFPILOT_ARCHIVE_MAX_THREADS;
+  return (unsigned)value;
+}
+
+
 static int
-archive_write_status_prepared(const char *src, const char *dst) {
+archive_write_status_prepared(const char *src, const char *dst,
+                              unsigned threads) {
   json_buf_t b = {0};
 #if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
   const char *worker = "bfpilot-integrated-archive";
@@ -1740,6 +1784,11 @@ archive_write_status_prepared(const char *src, const char *dst) {
                  ",\"error\":\"\",\"percent\":0,\"totalBytes\":0,"
                  "\"bytesWritten\":0,\"filesDone\":0,\"totalFiles\":0,"
                  "\"elapsedMs\":0,\"averageMBps\":0,\"errno\":0,"
+                 "\"threads\":") != 0 ||
+     json_appendf(&b, "%u", threads) != 0 ||
+     json_append(&b, ",\"threadMode\":\"") != 0 ||
+     json_append(&b, threads == 0 ? "auto" : "manual") != 0 ||
+     json_append(&b, "\","
                  "\"requiresInjection\":") != 0 ||
      json_append(&b, requires_injection) != 0 ||
      json_append(&b, "}") != 0) {
@@ -1755,19 +1804,18 @@ archive_write_status_prepared(const char *src, const char *dst) {
 
 static int
 archive_status_handler(const http_request_t *req) {
+  const char *idle_body =
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+      "{\"ok\":true,\"worker\":\"bfpilot-integrated-archive\","
+      "\"state\":\"idle\",\"requiresInjection\":false}";
+#else
+      "{\"ok\":true,\"worker\":\"bfpilot-archive-worker\","
+      "\"state\":\"idle\",\"requiresInjection\":true}";
+#endif
   int fd = open(BFPILOT_ARCHIVE_STATUS, O_RDONLY);
   if(fd < 0) {
-#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
-    const char idle[] =
-        "{\"ok\":true,\"worker\":\"bfpilot-integrated-archive\","
-        "\"state\":\"idle\",\"requiresInjection\":false}";
-#else
-    const char idle[] =
-        "{\"ok\":true,\"worker\":\"bfpilot-archive-worker\","
-        "\"state\":\"idle\",\"requiresInjection\":true}";
-#endif
     return websrv_send(req->fd, 200, "application/json",
-                       idle, sizeof(idle) - 1);
+                       idle_body, strlen(idle_body));
   }
   char *buf = malloc(32768);
   if(!buf) {
@@ -1782,8 +1830,18 @@ archive_status_handler(const http_request_t *req) {
     errno = saved;
     return serve_error(req, 500, strerror(errno));
   }
+  if(n == 0) {
+    free(buf);
+    return websrv_send(req->fd, 200, "application/json",
+                       idle_body, strlen(idle_body));
+  }
 #if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
   buf[n] = 0;
+  if(!strstr(buf, "\"ok\":") || !strstr(buf, "\"state\":")) {
+    free(buf);
+    return websrv_send(req->fd, 200, "application/json",
+                       idle_body, strlen(idle_body));
+  }
   if(strstr(buf, "\"state\":\"done\"") ||
      strstr(buf, "\"state\":\"error\"") ||
      strstr(buf, "\"state\":\"idle\"")) {
@@ -1806,13 +1864,14 @@ archive_support_handler(const http_request_t *req) {
       "{\"ok\":true,\"worker\":\"bfpilot-archive-worker.elf\","
       "\"requiresInjection\":true,"
 #endif
-      "\"jobPath\":\"/data/bfpilot/archive/job.ini\","
-      "\"statusPath\":\"/data/bfpilot/archive/status.json\","
+      "\"jobPath\":\"" BFPILOT_ARCHIVE_JOB "\","
+      "\"statusPath\":\"" BFPILOT_ARCHIVE_STATUS "\","
       "\"supported\":[\"rar\",\"7z\",\"7z.001\",\"zip\"],"
       "\"passwords\":{\"rar\":true,\"7z\":true,"
       "\"zip\":\"ZipCrypto only; AES zip reports unsupported\"},"
       "\"multipart\":{\"rar\":true,\"7z.001\":true,"
       "\"zip\":false},"
+      "\"threading\":{\"default\":\"auto\",\"max\":8},"
       "\"allowedRoots\":[\"/data\",\"/mnt/usb0-7\",\"/mnt/ext0-7\"]}";
   return websrv_send(req->fd, 200, "application/json",
                      body, sizeof(body) - 1);
@@ -1925,6 +1984,8 @@ archive_busy_claimed:
     return rc;
   }
 
+  unsigned normalized_threads = archive_normalize_threads_text(threads);
+
   json_buf_t job = {0};
   if(json_append(&job, "source=") != 0 ||
      json_append(&job, src) != 0 ||
@@ -1933,7 +1994,7 @@ archive_busy_claimed:
      json_append(&job, "\npassword=") != 0 ||
      json_append(&job, password) != 0 ||
      json_append(&job, "\nthreads=") != 0 ||
-     json_append(&job, threads) != 0 ||
+     json_appendf(&job, "%u", normalized_threads) != 0 ||
      json_append(&job, "\ncleanupPartial=0\n") != 0) {
     free(job.data);
     int rc = serve_error(req, 500, "out of memory");
@@ -1953,7 +2014,7 @@ archive_busy_claimed:
   }
   free(job.data);
 
-  if(archive_write_status_prepared(src, dst) != 0) {
+  if(archive_write_status_prepared(src, dst, normalized_threads) != 0) {
     int rc = serve_error(req, 500, strerror(errno));
 #if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
     atomic_store(&g_archive_busy, 0);
@@ -1961,8 +2022,9 @@ archive_busy_claimed:
     return rc;
   }
 
-  bfpilot_log("archive prepare source=%s destination=%s password=%s",
-              src, dst, password[0] ? "provided" : "empty");
+  bfpilot_log("archive prepare source=%s destination=%s password=%s threads=%u mode=%s",
+              src, dst, password[0] ? "provided" : "empty",
+              normalized_threads, normalized_threads == 0 ? "auto" : "manual");
 
 #if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
   bfpilot_log("archive integrated worker job queued");
@@ -1985,6 +2047,9 @@ archive_busy_claimed:
      json_string(&res, src) != 0 ||
      json_append(&res, ",\"destination\":") != 0 ||
      json_string(&res, dst) != 0 ||
+     json_appendf(&res, ",\"threads\":%u,\"threadMode\":\"%s\"",
+                  normalized_threads,
+                  normalized_threads == 0 ? "auto" : "manual") != 0 ||
      json_append(&res, ",\"next\":") != 0 ||
 #if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
      json_string(&res, "archive extraction started") != 0 ||

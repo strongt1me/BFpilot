@@ -46,6 +46,10 @@
 #define BFPILOT_ENABLE_INTEGRATED_ARCHIVE 0
 #endif
 
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+#include "archive_worker.h"
+#endif
+
 static void
 detect_lan_ip(char *out, size_t out_size) {
   struct ifaddrs *ifaddr = NULL;
@@ -330,7 +334,11 @@ main(int argc, char **argv) {
   puts("  active: standalone web file manager");
   printf("  mode: %s\n", BFPILOT_BUILD_MODE);
   puts("  scope: browse, upload, download, copy, move, delete, rename, mkdir");
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  puts("  archive: integrated extractor enabled; no worker injection required");
+#else
   puts("  archive: prepare jobs only; inject bfpilot-archive-worker.elf to extract");
+#endif
   puts("  ps5 app: launcher installer is a separate optional payload");
   printf("  web ui: http://%s:%u/\n", ready.ip, (unsigned int)ready.port);
   puts("  inject/deploy port: 9021");

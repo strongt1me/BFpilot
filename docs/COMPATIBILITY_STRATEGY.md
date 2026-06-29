@@ -1,7 +1,7 @@
 # BFpilot Compatibility Strategy
 
-BFpilot now keeps the stable file manager and the fragile launcher installer as
-separate payloads.
+BFpilot keeps the file manager/archive runtime and the fragile launcher
+installer as separate payloads.
 
 ## Payload Roles
 
@@ -10,11 +10,15 @@ separate payloads.
 Main release payload. Test this first on every firmware and loader.
 
 - Starts the HTTP file manager on port `5905`.
+- Starts the integrated archive daemon for RAR, 7z, split 7z, and ZIP
+  extraction.
 - Does not install or refresh a launcher tile.
 - Does not include integrated launcher installer source.
 - Does not link AppInstUtil.
 - Does not depend on SystemService, UserService, AppInstUtil, or `kernel_sys`.
 - Writes boot/runtime/crash diagnostics under `/data/BFpilot`.
+- Writes integrated archive job, status, lock, and extraction logs under
+  `/data/BFpilot/archive-integrated`.
 
 Broad firmware support comes from avoiding imports that can fail before
 `main()` on some loader/firmware combinations.
@@ -39,21 +43,28 @@ The tile target is:
 http://127.0.0.1:5905/
 ```
 
-### Archive Worker
+### Archive Runtime
 
-Archive extraction is handled by the separate `bfpilot-archive-worker.elf`
-payload.
+Archive extraction is handled by the integrated daemon inside `bfpilot.elf`.
+`bfpilot-archive-worker.elf` is a fallback diagnostic build of the same archive
+engine, not the normal user flow.
 
-- Reads `/data/bfpilot/archive/job.ini`.
-- Writes `/data/bfpilot/archive/status.json`.
-- Logs to `/data/bfpilot/archive/archive-worker.log`.
+- Reads `/data/BFpilot/archive-integrated/job.ini` in the integrated main ELF.
+- Writes `/data/BFpilot/archive-integrated/status.json` in the integrated main
+  ELF.
+- Logs to `/data/BFpilot/archive-integrated/archive-worker.log` in the
+  integrated main ELF.
 - Extracts only to allowed roots: `/data`, `/mnt/usb0..7`, and
   `/mnt/ext0..7`.
 - Uses a BFpilot-owned staging directory and renames it into place only after a
   successful extraction.
 - Does not link AppInstUtil or launcher installer libraries.
-- Uses `/data/bfpilot/archive/daemon.lock` so repeated payload injections do
-  not create competing archive workers.
+- Uses `/data/BFpilot/archive-integrated/daemon.lock` so repeated payload
+  injections do not create competing archive daemons.
+- Records the daemon PID in `daemon.lock` and exits when its parent file
+  manager process is replaced.
+- The standalone diagnostic worker keeps the legacy
+  `/data/BFpilot/archive/*` paths so it cannot race integrated jobs.
 
 ## Why The Split Exists
 
@@ -66,8 +77,10 @@ approaches are unreliable:
 - Loading AppInst without the matching service/authid context can fail before a
   useful install result is produced.
 
-BFpilot keeps launcher and archive risk out of the file manager. If either
-helper payload fails, the file manager payload remains compatible and usable.
+BFpilot keeps launcher risk out of the file manager. Archive extraction is
+inside `bfpilot.elf` so users do not need a second injection, while the
+launcher installer remains isolated because those imports are the highest
+compatibility risk.
 
 ## Boot Marker
 
@@ -122,6 +135,7 @@ The target builds and checks only:
 
 - `bfpilot.elf`
 - `bfpilot-launcher-installer.elf`
+- `bfpilot-archive-worker.elf`
 
 It fails if `bfpilot.elf` contains launcher/AppInstUtil fingerprints or direct
 launcher imports. It also fails if the installer is missing any required direct
@@ -129,4 +143,5 @@ dependency: `libkernel_sys.sprx`, `libSceSystemService.sprx`,
 `libSceUserService.sprx`, or `libSceAppInstUtil.sprx`.
 
 The supported release build contains only the file manager payload and the
-isolated launcher installer.
+isolated launcher installer for normal use. The archive worker build remains
+available for diagnostics and comparison testing.

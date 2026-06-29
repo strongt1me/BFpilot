@@ -5,7 +5,8 @@ BFpilot is a lightweight PS5 payload that serves a browser-based file manager at
 
 The project is split into three payloads:
 
-- `bfpilot.elf` - the main file manager payload.
+- `bfpilot.elf` - the main file manager payload with integrated archive
+  extraction.
 - `bfpilot-launcher-installer.elf` - an optional home-screen tile installer.
 - `bfpilot-archive-worker.elf` - a fallback diagnostic archive worker.
 
@@ -20,8 +21,7 @@ touching PS5 app installation services.
 - Copy, move, rename, create folders, and delete from the web UI.
 - PS5-side copy and move operations with progress and cancellation.
 - Transfer timing, throughput, and device diagnostics.
-- Prepare archive jobs from the main file manager ELF and extract them with
-  the separate worker payload.
+- Extract RAR, 7z, split 7z, and ZIP archives from the main file manager ELF.
 - Clean places sidebar for Root, Homebrew, Mounts, User, Data, mounted drives,
   and custom shortcuts.
 - Mounted USB/ext drives are shown only when they are actually present.
@@ -33,13 +33,13 @@ touching PS5 app installation services.
 
 Use the release assets:
 
-- `bfpilot.elf` for the file manager.
+- `bfpilot.elf` for the file manager and archive extraction.
 - `bfpilot-launcher-installer.elf` only if you want the PS5 home-screen tile.
-- `bfpilot-archive-worker.elf` for archive extraction and diagnostics.
+- `bfpilot-archive-worker.elf` only as a fallback diagnostic archive worker.
 
-Run `bfpilot.elf` first. After the web UI is working, inject the archive worker
-payload if you want extraction. Run the launcher installer payload only if you
-want the tile.
+Run `bfpilot.elf` first. It serves the web UI and starts the integrated archive
+daemon; archive extraction does not require injecting another payload. Run the
+launcher installer payload only if you want the tile.
 
 ## Usage
 
@@ -77,9 +77,10 @@ http://127.0.0.1:5905/
 
 ## Archive Extraction
 
-Archive extraction is separated from `bfpilot.elf`. The file manager prepares
-jobs and reports status, while `bfpilot-archive-worker.elf` performs the
-extraction work.
+Archive extraction is integrated into `bfpilot.elf`. The file manager prepares
+jobs, starts a lightweight archive daemon, and reports progress through the web
+API. `bfpilot-archive-worker.elf` is kept as a fallback diagnostic build of the
+same archive engine.
 
 From the web UI:
 
@@ -102,6 +103,11 @@ Supported today:
 - 7z, passworded 7z, and `.7z.001` split sets.
 - ZIP stored/deflate entries, ZIP64 sizes/offsets, and traditional ZipCrypto
   passwords.
+
+Extraction uses automatic archive-engine threading by default. The archive API
+accepts `threads=0` for automatic tuning, or `threads=1..8` for manual
+benchmarking. Status responses include `threads`, `threadMode`, elapsed time,
+and average MB/s.
 
 Known limits:
 
@@ -131,7 +137,8 @@ bfpilot-archive-worker.elf
 
 `make inspect-imports` verifies that the file manager payload does not contain
 launcher/AppInstUtil imports and that the isolated installer contains the
-required installer imports.
+required installer imports. The file manager may include archive engine code,
+but it must remain launcher-free.
 
 ## Diagnostics
 
@@ -139,6 +146,14 @@ Local read-only diagnostics:
 
 ```sh
 PS5_IP=192.168.1.204 BF_WEB_PORT=5905 make ps5-diag
+```
+
+Read-only storage accounting audit for Settings/BFpilot free-space mismatches:
+
+```sh
+PS5_IP=192.168.1.204 BF_WEB_PORT=5905 make ps5-storage-audit
+PS5_IP=192.168.1.204 BF_WEB_PORT=5905 \
+python3 scripts/ps5_storage_audit.py --deep --settings-free-gb 18
 ```
 
 Smoke test the file APIs using only BFpilot-created files under `/data/test`:
@@ -165,8 +180,10 @@ Runtime logs are stored on the PS5 at:
 /data/BFpilot/log.txt
 /data/BFpilot/crash.log
 /data/BFpilot/launcher-installer.log
-/data/bfpilot/archive/archive-worker.log
-/data/bfpilot/archive/status.json
+/data/BFpilot/archive-integrated/archive-worker.log
+/data/BFpilot/archive-integrated/status.json
+/data/BFpilot/archive/archive-worker.log
+/data/BFpilot/archive/status.json
 ```
 
 ## Compatibility Notes
@@ -174,7 +191,9 @@ Runtime logs are stored on the PS5 at:
 `bfpilot.elf` is launcher-free by design. It avoids AppInstUtil,
 SystemService, UserService, and privileged launcher imports because those can
 fail before `main()` on some firmware/loader combinations. Archive extraction
-is kept out of the main ELF and handled by the standalone worker payload.
+is integrated into the main ELF, but only through libc/network-safe archive
+code and the BFpilot-owned job/status files under
+`/data/BFpilot/archive-integrated`.
 
 `bfpilot-launcher-installer.elf` is separate and uses the complete launcher
 installer dependency set. If launcher installation fails on a firmware, the file

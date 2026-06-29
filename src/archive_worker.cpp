@@ -2,8 +2,8 @@
  * BFpilot - archive extraction worker.
  *
  * This file is used in two modes:
- * - linked into bfpilot.elf for the normal standalone extraction path
- * - built as bfpilot-archive-worker.elf for diagnostics and fallback testing
+ * - optionally linked into bfpilot.elf when integrated archive support is enabled
+ * - built as bfpilot-archive-worker.elf for the standalone extraction daemon
  */
 
 #include "archive_worker.h"
@@ -30,7 +30,15 @@
 #include <unistd.h>
 #include <vector>
 
-#define BFPILOT_ARCHIVE_DIR "/data/bfpilot/archive"
+#ifndef BFPILOT_ARCHIVE_INTEGRATED
+#define BFPILOT_ARCHIVE_INTEGRATED 0
+#endif
+
+#if BFPILOT_ARCHIVE_INTEGRATED
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive-integrated"
+#else
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive"
+#endif
 #define BFPILOT_ARCHIVE_JOB BFPILOT_ARCHIVE_DIR "/job.ini"
 #define BFPILOT_ARCHIVE_STATUS BFPILOT_ARCHIVE_DIR "/status.json"
 #define BFPILOT_ARCHIVE_STATUS_TMP BFPILOT_ARCHIVE_DIR "/status.tmp"
@@ -42,6 +50,8 @@
 #define ZIP_SIG_END 0x06054b50U
 #define ZIP_SIG_ZIP64_END 0x06064b50U
 #define ZIP_SIG_ZIP64_LOCATOR 0x07064b50U
+#define BFPILOT_ARCHIVE_MAX_THREADS 8U
+#define BFPILOT_ZIP_IO_BUFFER_SIZE (1024U * 1024U)
 
 struct ArchiveConfig {
   std::string source;
@@ -63,6 +73,7 @@ struct WorkerStatus {
   unsigned long long bytes_written;
   unsigned long long files_done;
   unsigned long long total_files;
+  unsigned threads;
   int percent;
   int errno_code;
   int archive_exit_code;
@@ -292,6 +303,22 @@ ReadExactAt(int fd, unsigned long long offset, void *data, size_t size) {
   return ReadExact(fd, data, size);
 }
 
+static unsigned
+NormalizeArchiveThreads(unsigned requested) {
+  if(requested == 0) return 0;
+  if(requested > BFPILOT_ARCHIVE_MAX_THREADS) return BFPILOT_ARCHIVE_MAX_THREADS;
+  return requested;
+}
+
+static unsigned
+ParseArchiveThreads(const std::string &value) {
+  if(value.empty()) return 0;
+  for(size_t i = 0; i < value.size(); i++) {
+    if(value[i] < '0' || value[i] > '9') return 0;
+  }
+  return NormalizeArchiveThreads((unsigned)strtoul(value.c_str(), NULL, 10));
+}
+
 static void
 LogLine(const char *fmt, ...) {
   if(!MkdirAll(BFPILOT_ARCHIVE_DIR)) return;
@@ -350,6 +377,7 @@ WriteStatus(bool force) {
       "\"percent\":%d,\"totalBytes\":%llu,\"bytesWritten\":%llu,"
       "\"filesDone\":%llu,\"totalFiles\":%llu,"
       "\"elapsedMs\":%ld,\"averageMBps\":%.2f,\"errno\":%d,"
+      "\"threads\":%u,\"threadMode\":\"%s\","
       "\"archiveExitCode\":%d,"
       "\"requiresInjection\":%s}",
       worker_name,
@@ -362,7 +390,9 @@ WriteStatus(bool force) {
       JsonEscape(g_status.error).c_str(),
       g_status.percent, g_status.total_bytes, g_status.bytes_written,
       g_status.files_done, g_status.total_files, elapsed_ms, mbps,
-      g_status.errno_code, g_status.archive_exit_code, requires_injection);
+      g_status.errno_code, g_status.threads,
+      g_status.threads == 0 ? "auto" : "manual",
+      g_status.archive_exit_code, requires_injection);
   if(n < 0) return;
   size_t len = (size_t)std::min(n, (int)sizeof(body) - 1);
 
@@ -454,7 +484,7 @@ LoadConfig(ArchiveConfig &cfg, std::string &error) {
     if(key == "source") cfg.source = value;
     else if(key == "destination") cfg.destination = value;
     else if(key == "password") cfg.password = value;
-    else if(key == "threads") cfg.threads = (unsigned)strtoul(value.c_str(), NULL, 10);
+    else if(key == "threads") cfg.threads = ParseArchiveThreads(value);
     else if(key == "cleanupPartial") {
       cfg.cleanup_partial =
           value == "1" || value == "true" || value == "yes" || value == "on";
@@ -474,11 +504,12 @@ LoadConfig(ArchiveConfig &cfg, std::string &error) {
     error = "archive job is missing source or destination";
     return false;
   }
-  if(cfg.threads > 1) {
-    LogLine("requested threads=%u clamped to 1 for PS5 stability",
+  unsigned requested_threads = cfg.threads;
+  cfg.threads = NormalizeArchiveThreads(cfg.threads);
+  if(requested_threads != cfg.threads) {
+    LogLine("requested threads=%u clamped to %u", requested_threads,
             cfg.threads);
   }
-  cfg.threads = 1;
   return true;
 }
 
@@ -712,6 +743,22 @@ struct ZipEntry {
   bool aes_encrypted;
 };
 
+struct ZipIoBuffers {
+  std::vector<unsigned char> in;
+  std::vector<unsigned char> out;
+
+  bool Init(std::string &error) {
+    try {
+      in.resize(BFPILOT_ZIP_IO_BUFFER_SIZE);
+      out.resize(BFPILOT_ZIP_IO_BUFFER_SIZE);
+    } catch(...) {
+      error = "out of memory";
+      return false;
+    }
+    return true;
+  }
+};
+
 static bool
 ParseZip64Extra(const std::vector<unsigned char> &extra, ZipEntry &entry,
                 bool need_uncomp, bool need_comp, bool need_offset) {
@@ -901,26 +948,29 @@ OpenZipEntryData(int fd, const ZipEntry &entry, unsigned long long &data_offset,
 static bool
 WriteZipStoredFile(int zip_fd, int out_fd, ZipEntry &entry,
                    unsigned long long data_offset, ZipCrypto *crypto,
-                   std::string &error) {
-  unsigned char buf[128 * 1024];
+                   ZipIoBuffers &buffers, std::string &error) {
+  std::vector<unsigned char> &buf = buffers.in;
   unsigned long long remaining = entry.compressed_size;
   mz_ulong crc = MZ_CRC32_INIT;
   unsigned long long written = 0;
 
+  if(lseek(zip_fd, (off_t)data_offset, SEEK_SET) < 0) {
+    error = "failed to seek stored zip data";
+    return false;
+  }
   while(remaining > 0) {
     size_t want =
-        (size_t)std::min<unsigned long long>(remaining, sizeof(buf));
-    if(!ReadExactAt(zip_fd, data_offset, buf, want)) {
+        (size_t)std::min<unsigned long long>(remaining, buf.size());
+    if(!ReadExact(zip_fd, buf.data(), want)) {
       error = "failed to read stored zip data";
       return false;
     }
-    if(crypto) crypto->decrypt_buffer(buf, want);
-    if(!WriteAll(out_fd, buf, want)) {
+    if(crypto) crypto->decrypt_buffer(buf.data(), want);
+    if(!WriteAll(out_fd, buf.data(), want)) {
       error = "failed to write extracted zip file";
       return false;
     }
-    crc = mz_crc32(crc, buf, want);
-    data_offset += want;
+    crc = mz_crc32(crc, buf.data(), want);
     remaining -= want;
     written += want;
     g_status.bytes_written += want;
@@ -945,9 +995,9 @@ WriteZipStoredFile(int zip_fd, int out_fd, ZipEntry &entry,
 static bool
 WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
                      unsigned long long data_offset, ZipCrypto *crypto,
-                     std::string &error) {
-  unsigned char inbuf[128 * 1024];
-  unsigned char outbuf[128 * 1024];
+                     ZipIoBuffers &buffers, std::string &error) {
+  std::vector<unsigned char> &inbuf = buffers.in;
+  std::vector<unsigned char> &outbuf = buffers.out;
   unsigned long long remaining = entry.compressed_size;
   unsigned long long written = 0;
   mz_ulong crc = MZ_CRC32_INIT;
@@ -960,35 +1010,40 @@ WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
     return false;
   }
 
+  if(lseek(zip_fd, (off_t)data_offset, SEEK_SET) < 0) {
+    mz_inflateEnd(&stream);
+    error = "failed to seek deflated zip data";
+    return false;
+  }
+
   bool ok = true;
   bool done = false;
   while(!done) {
     if(stream.avail_in == 0 && remaining > 0) {
       size_t want =
-          (size_t)std::min<unsigned long long>(remaining, sizeof(inbuf));
-      if(!ReadExactAt(zip_fd, data_offset, inbuf, want)) {
+          (size_t)std::min<unsigned long long>(remaining, inbuf.size());
+      if(!ReadExact(zip_fd, inbuf.data(), want)) {
         error = "failed to read deflated zip data";
         ok = false;
         break;
       }
-      if(crypto) crypto->decrypt_buffer(inbuf, want);
-      data_offset += want;
+      if(crypto) crypto->decrypt_buffer(inbuf.data(), want);
       remaining -= want;
-      stream.next_in = inbuf;
+      stream.next_in = inbuf.data();
       stream.avail_in = (mz_uint)want;
     }
 
-    stream.next_out = outbuf;
-    stream.avail_out = sizeof(outbuf);
+    stream.next_out = outbuf.data();
+    stream.avail_out = (mz_uint)outbuf.size();
     zrc = mz_inflate(&stream, remaining == 0 ? MZ_FINISH : MZ_NO_FLUSH);
-    size_t produced = sizeof(outbuf) - stream.avail_out;
+    size_t produced = outbuf.size() - stream.avail_out;
     if(produced > 0) {
-      if(!WriteAll(out_fd, outbuf, produced)) {
+      if(!WriteAll(out_fd, outbuf.data(), produced)) {
         error = "failed to write extracted zip file";
         ok = false;
         break;
       }
-      crc = mz_crc32(crc, outbuf, produced);
+      crc = mz_crc32(crc, outbuf.data(), produced);
       written += produced;
       g_status.bytes_written += produced;
       g_status.percent = g_status.total_bytes > 0
@@ -1026,7 +1081,8 @@ WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
 
 static bool
 ExtractOneZipEntry(int zip_fd, ZipEntry &entry, const std::string &dest,
-                   const std::string &password, std::string &error) {
+                   const std::string &password, ZipIoBuffers &buffers,
+                   std::string &error) {
   std::string out_path = JoinPath(dest, entry.name);
   g_status.current = entry.name;
 
@@ -1095,9 +1151,11 @@ ExtractOneZipEntry(int zip_fd, ZipEntry &entry, const std::string &dest,
 
   bool ok = false;
   if(entry.method == 0) {
-    ok = WriteZipStoredFile(zip_fd, out_fd, entry, data_offset, crypto, error);
+    ok = WriteZipStoredFile(zip_fd, out_fd, entry, data_offset, crypto,
+                            buffers, error);
   } else {
-    ok = WriteZipDeflatedFile(zip_fd, out_fd, entry, data_offset, crypto, error);
+    ok = WriteZipDeflatedFile(zip_fd, out_fd, entry, data_offset, crypto,
+                              buffers, error);
   }
 
   if(close(out_fd) != 0 && ok) {
@@ -1155,8 +1213,15 @@ RunZipExtract(const std::string &archive_path, const std::string &dest_path,
     return false;
   }
 
+  ZipIoBuffers buffers;
+  if(!buffers.Init(error)) {
+    close(fd);
+    return false;
+  }
+
   for(size_t i = 0; i < entries.size(); i++) {
-    if(!ExtractOneZipEntry(fd, entries[i], dest_path, password, error)) {
+    if(!ExtractOneZipEntry(fd, entries[i], dest_path, password, buffers,
+                           error)) {
       close(fd);
       return false;
     }
@@ -1223,6 +1288,7 @@ bfpilot_archive_run_prepared_job(void) {
   g_status.bytes_written = 0;
   g_status.files_done = 0;
   g_status.total_files = 0;
+  g_status.threads = 0;
   g_status.source.clear();
   g_status.destination.clear();
   g_status.stage.clear();
@@ -1247,6 +1313,7 @@ bfpilot_archive_run_prepared_job(void) {
 
   g_status.source = cfg.source;
   g_status.destination = cfg.destination;
+  g_status.threads = cfg.threads;
 
   struct stat src_st;
   if(stat(cfg.source.c_str(), &src_st) != 0 || !S_ISREG(src_st.st_mode)) {
@@ -1301,9 +1368,10 @@ bfpilot_archive_run_prepared_job(void) {
   ArchiveType type = DetectArchiveType(cfg.source);
   g_status.archive_type = ArchiveTypeName(type);
   SetStatus("running", "extracting", true);
-  LogLine("extract start type=%s source=%s destination=%s stage=%s password=%s",
+  LogLine("extract start type=%s source=%s destination=%s stage=%s password=%s threads=%u mode=%s",
           ArchiveTypeName(type), cfg.source.c_str(), cfg.destination.c_str(),
-          g_status.stage.c_str(), cfg.password.empty() ? "empty" : "provided");
+          g_status.stage.c_str(), cfg.password.empty() ? "empty" : "provided",
+          cfg.threads, cfg.threads == 0 ? "auto" : "manual");
 
   int rc = RunArchive(cfg, type, error);
   if(rc != 0) {
@@ -1349,26 +1417,54 @@ bfpilot_archive_run_prepared_job(void) {
 }
 
 static int
-ArchiveDaemonMain(void) {
+ArchiveDaemonMain(pid_t parent_pid) {
   if(!MkdirAll(BFPILOT_ARCHIVE_DIR)) {
     LogLine("archive daemon mkdir failed errno=%d", errno);
     return 2;
   }
 
-  int lock_fd = open(BFPILOT_ARCHIVE_DAEMON_LOCK, O_WRONLY | O_CREAT, 0666);
+  int lock_fd = open(BFPILOT_ARCHIVE_DAEMON_LOCK, O_RDWR | O_CREAT, 0666);
   if(lock_fd < 0) {
     LogLine("archive daemon lock open failed errno=%d", errno);
     return 3;
   }
-  if(flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
-    LogLine("archive daemon lock busy errno=%d", errno);
+  int lock_rc = -1;
+  for(int attempt = 0; attempt < 40; attempt++) {
+    lock_rc = flock(lock_fd, LOCK_EX | LOCK_NB);
+    if(lock_rc == 0) break;
+    int saved_errno = errno;
+    if(saved_errno != EWOULDBLOCK && saved_errno != EAGAIN) {
+      LogLine("archive daemon lock failed errno=%d", saved_errno);
+      close(lock_fd);
+      return 4;
+    }
+    if(attempt == 0) {
+      LogLine("archive daemon lock busy; waiting for old daemon");
+    }
+    usleep(250000);
+  }
+  if(lock_rc != 0) {
+    LogLine("archive daemon lock still busy errno=%d", errno);
     close(lock_fd);
     return 4;
   }
 
-  LogLine("archive daemon started pid=%ld", (long)getpid());
+  char pid_buf[64];
+  int pid_len = snprintf(pid_buf, sizeof(pid_buf), "%ld\n", (long)getpid());
+  if(pid_len > 0) {
+    ftruncate(lock_fd, 0);
+    write(lock_fd, pid_buf, (size_t)pid_len);
+  }
+
+  LogLine("archive daemon started pid=%ld parent=%ld",
+          (long)getpid(), (long)parent_pid);
   std::string last_job;
   for(;;) {
+    if(parent_pid > 1 && getppid() != parent_pid) {
+      LogLine("archive daemon parent changed parent=%ld expected=%ld; exiting",
+              (long)getppid(), (long)parent_pid);
+      break;
+    }
     std::string status;
     bool prepared = ReadSmallFile(BFPILOT_ARCHIVE_STATUS, status, 32768) &&
                     status.find("\"state\":\"prepared\"") != std::string::npos;
@@ -1384,6 +1480,8 @@ ArchiveDaemonMain(void) {
     }
     usleep(250000);
   }
+  close(lock_fd);
+  return 0;
 }
 
 extern "C" int
@@ -1394,7 +1492,7 @@ bfpilot_archive_start_daemon(void) {
     return -errno;
   }
   if(child == 0) {
-    int rc = ArchiveDaemonMain();
+    int rc = ArchiveDaemonMain(getppid());
     _exit(rc & 0xff);
   }
   LogLine("archive daemon forked pid=%ld", (long)child);
@@ -1404,6 +1502,7 @@ bfpilot_archive_start_daemon(void) {
 #ifndef BFPILOT_ARCHIVE_NO_MAIN
 int
 main(void) {
-  return bfpilot_archive_run_prepared_job();
+  int rc = bfpilot_archive_start_daemon();
+  return rc < 0 ? 1 : 0;
 }
 #endif

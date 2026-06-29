@@ -861,10 +861,16 @@
       if (!place || !place.statvfs || !Number.isFinite(place.totalBytes) || place.totalBytes <= 0) {
         return '';
       }
-      const free = Number(place.availableBytes || place.freeBytes || 0);
-      const pct = Number(place.usedPercent || 0);
-      return shortSize(free) + ' free of ' + shortSize(place.totalBytes) +
+      const availableValue = Number(place.availableBytes);
+      const free = Number.isFinite(availableValue) ? availableValue : Number(place.freeBytes || 0);
+      const total = Number(place.usableTotalBytes || place.totalBytes || 0);
+      const pctValue = Number(place.usableUsedPercent);
+      const pct = Number.isFinite(pctValue) ? pctValue : Number(place.usedPercent || 0);
+      const reserved = Number(place.reservedBytes || 0);
+      let summary = shortSize(free) + ' usable free of ' + shortSize(total) +
         ', ' + pct.toFixed(0) + '% used';
+      if (reserved > 0) summary += ', ' + shortSize(reserved) + ' reserved';
+      return summary;
     }
 
     function placeSubtitle(place) {

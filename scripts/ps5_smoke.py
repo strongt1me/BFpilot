@@ -24,7 +24,7 @@ def safe_root(path: str) -> bool:
     path = path.rstrip("/")
     return (
         path.startswith("/data/test/bfpilot-smoke-")
-        or path.startswith("/data/bfpilot/bfpilot-smoke-")
+        or path.startswith("/data/BFpilot/bfpilot-smoke-")
     )
 
 
@@ -108,8 +108,8 @@ def main() -> int:
     port = os.environ.get("BF_WEB_PORT", "5905")
     base = f"http://{host}:{port}"
     parent = os.environ.get("BF_TEST_REMOTE_ROOT", "/data/test").rstrip("/")
-    if parent not in ("/data/test", "/data/bfpilot"):
-        print("FAIL BF_TEST_REMOTE_ROOT must be /data/test or /data/bfpilot", file=sys.stderr)
+    if parent not in ("/data/test", "/data/BFpilot"):
+        print("FAIL BF_TEST_REMOTE_ROOT must be /data/test or /data/BFpilot", file=sys.stderr)
         return 2
 
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

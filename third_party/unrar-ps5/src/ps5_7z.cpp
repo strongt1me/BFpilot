@@ -668,12 +668,13 @@ static void Set7zProperties(IInArchive *Archive,uint Threads)
   if (!SetProperties)
     return;
 
-  (void)Threads;
-  const wchar_t *Names[2]={ L"mt", L"mtf" };
-  NCOM::CPropVariant Values[2];
-  Values[0]=(UInt32)1;
-  Values[1]=false;
-  SetProperties->SetProperties(Names,Values,2);
+  if (Threads==0)
+    return;
+
+  const wchar_t *Names[1]={ L"mt" };
+  NCOM::CPropVariant Values[1];
+  Values[0]=(UInt32)std::min<uint>(Threads,8);
+  SetProperties->SetProperties(Names,Values,1);
 }
 
 SevenZExtractResult Run7zExtract(const std::string &ArchivePath,
@@ -745,10 +746,15 @@ SevenZExtractResult Run7zExtract(const std::string &ArchivePath,
       Result.code=RARX_BADPWD;
       Result.reason="bad 7z password or extraction aborted";
     }
-    else
+    else if (Password.empty())
     {
       Result.code=RARX_OPEN;
       Result.reason="missing 7z volume or open error";
+    }
+    else
+    {
+      Result.code=RARX_BADPWD;
+      Result.reason="bad 7z password or encrypted-header open error";
     }
     if (VolumeStreamSpec && !VolumeStreamSpec->MissingVolume.empty())
       Result.missing_volume=VolumeStreamSpec->MissingVolume;

@@ -30,8 +30,23 @@ def fetch_json(base: str, path: str) -> tuple[bool, object]:
 
 def fetch_logs(base: str, out_dir: pathlib.Path, stamp: str) -> dict[str, object]:
     results: dict[str, object] = {}
-    for name in ("boot.log", "log.txt", "crash.log", "launcher-installer.log"):
-        url = base + "/fs/data/BFpilot/" + urllib.parse.quote(name)
+    log_paths = [
+        ("boot.log", "/data/BFpilot/boot.log"),
+        ("log.txt", "/data/BFpilot/log.txt"),
+        ("crash.log", "/data/BFpilot/crash.log"),
+        ("launcher-installer.log", "/data/BFpilot/launcher-installer.log"),
+        ("archive-integrated-status.json",
+         "/data/BFpilot/archive-integrated/status.json"),
+        ("archive-integrated-worker.log",
+         "/data/BFpilot/archive-integrated/archive-worker.log"),
+        ("archive-integrated-daemon.lock",
+         "/data/BFpilot/archive-integrated/daemon.lock"),
+        ("archive-status.json", "/data/BFpilot/archive/status.json"),
+        ("archive-worker.log", "/data/BFpilot/archive/archive-worker.log"),
+        ("archive-daemon.lock", "/data/BFpilot/archive/daemon.lock"),
+    ]
+    for name, remote_path in log_paths:
+        url = base + "/fs" + urllib.parse.quote(remote_path)
         try:
             with urllib.request.urlopen(url, timeout=8) as response:
                 data = response.read()
@@ -51,7 +66,7 @@ def allowed_remote(path: str) -> bool:
     roots = os.environ.get("BF_ALLOWED_REMOTE_ROOTS", "/data/test/bfpilot-bench")
     return any(path == root.rstrip("/") or path.startswith(root.rstrip("/") + "/")
                for root in roots.split(",")
-               if root.startswith("/data/test") or root.startswith("/data/bfpilot"))
+               if root.startswith("/data/test") or root.startswith("/data/BFpilot"))
 
 
 def run_bench(base: str) -> tuple[bool, object]:

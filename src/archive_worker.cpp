@@ -13,6 +13,7 @@
 #include "miniz.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
@@ -24,6 +25,7 @@
 #include <memory>
 #include <string>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -51,6 +53,9 @@
 #define ZIP_SIG_ZIP64_END 0x06064b50U
 #define ZIP_SIG_ZIP64_LOCATOR 0x07064b50U
 #define BFPILOT_ARCHIVE_MAX_THREADS 8U
+#define BFPILOT_ARCHIVE_AUTO_MAX_THREADS 2U
+#define BFPILOT_ARCHIVE_RAR_MAX_THREADS 1U
+#define BFPILOT_ARCHIVE_NICE (-10)
 #define BFPILOT_ZIP_IO_BUFFER_SIZE (1024U * 1024U)
 
 struct ArchiveConfig {
@@ -74,21 +79,96 @@ struct WorkerStatus {
   unsigned long long files_done;
   unsigned long long total_files;
   unsigned threads;
+  unsigned effective_threads;
   int percent;
   int errno_code;
   int archive_exit_code;
+  int priority_nice;
+  int priority_rc;
+  int priority_errno;
   long started_ms;
 };
 
 static WorkerStatus g_status;
 static long g_last_status_ms = 0;
 static int g_last_progress = -1;
+static std::atomic<unsigned long long> g_io_input_bytes;
+static std::atomic<unsigned long long> g_io_output_bytes;
+static std::atomic<unsigned long long> g_io_input_ops;
+static std::atomic<unsigned long long> g_io_output_ops;
+static std::atomic<unsigned long long> g_io_input_usec;
+static std::atomic<unsigned long long> g_io_output_usec;
+static std::atomic<unsigned long long> g_rar_mt_batches;
+static std::atomic<unsigned long long> g_rar_mt_threaded_batches;
+static std::atomic<unsigned long long> g_rar_mt_blocks;
+static std::atomic<unsigned long long> g_rar_mt_threaded_blocks;
+static std::atomic<unsigned long long> g_rar_mt_large_blocks;
+static struct rusage g_usage_start;
+static int g_usage_started = 0;
 
 static long
 NowMs(void) {
   struct timespec ts;
   if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
   return (long)ts.tv_sec * 1000L + (long)(ts.tv_nsec / 1000000L);
+}
+
+static unsigned long long
+NowUsec(void) {
+  struct timespec ts;
+  if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+  return (unsigned long long)ts.tv_sec * 1000000ULL +
+         (unsigned long long)(ts.tv_nsec / 1000ULL);
+}
+
+static void
+ResetIoCounters(void) {
+  g_io_input_bytes.store(0);
+  g_io_output_bytes.store(0);
+  g_io_input_ops.store(0);
+  g_io_output_ops.store(0);
+  g_io_input_usec.store(0);
+  g_io_output_usec.store(0);
+  g_rar_mt_batches.store(0);
+  g_rar_mt_threaded_batches.store(0);
+  g_rar_mt_blocks.store(0);
+  g_rar_mt_threaded_blocks.store(0);
+  g_rar_mt_large_blocks.store(0);
+  memset(&g_usage_start, 0, sizeof(g_usage_start));
+  g_usage_started = getrusage(RUSAGE_SELF, &g_usage_start) == 0 ? 1 : 0;
+}
+
+extern "C" void
+Ps5ArchiveInputSample(unsigned long long bytes, unsigned long long usec) {
+  if(bytes == 0) return;
+  g_io_input_bytes.fetch_add(bytes);
+  g_io_input_ops.fetch_add(1);
+  if(usec > 0) g_io_input_usec.fetch_add(usec);
+}
+
+extern "C" void
+Ps5ArchiveOutputSample(unsigned long long bytes, unsigned long long usec) {
+  if(bytes == 0) return;
+  g_io_output_bytes.fetch_add(bytes);
+  g_io_output_ops.fetch_add(1);
+  if(usec > 0) g_io_output_usec.fetch_add(usec);
+}
+
+extern "C" void
+Ps5ArchiveRarMtSample(unsigned blocks, unsigned threaded_blocks,
+                      unsigned large_blocks, unsigned threaded_batch) {
+  if(blocks == 0) return;
+  g_rar_mt_batches.fetch_add(1);
+  g_rar_mt_blocks.fetch_add(blocks);
+  if(threaded_blocks > 0) {
+    g_rar_mt_threaded_blocks.fetch_add(threaded_blocks);
+  }
+  if(large_blocks > 0) {
+    g_rar_mt_large_blocks.fetch_add(large_blocks);
+  }
+  if(threaded_batch) {
+    g_rar_mt_threaded_batches.fetch_add(1);
+  }
 }
 
 static std::string
@@ -311,6 +391,25 @@ NormalizeArchiveThreads(unsigned requested) {
 }
 
 static unsigned
+AutoArchiveThreads(void) {
+  long cpu = sysconf(_SC_NPROCESSORS_ONLN);
+  if(cpu < 1) cpu = sysconf(_SC_NPROCESSORS_CONF);
+  if(cpu < 1) return 1;
+  unsigned threads = (unsigned)cpu;
+  if(threads > BFPILOT_ARCHIVE_AUTO_MAX_THREADS) {
+    threads = BFPILOT_ARCHIVE_AUTO_MAX_THREADS;
+  }
+  return NormalizeArchiveThreads(threads);
+}
+
+static unsigned
+EffectiveArchiveThreads(unsigned requested) {
+  if(requested > 0) return NormalizeArchiveThreads(requested);
+  unsigned threads = AutoArchiveThreads();
+  return threads > 0 ? threads : 1;
+}
+
+static unsigned
 ParseArchiveThreads(const std::string &value) {
   if(value.empty()) return 0;
   for(size_t i = 0; i < value.size(); i++) {
@@ -340,6 +439,23 @@ LogLine(const char *fmt, ...) {
 }
 
 static void
+ApplyArchiveScheduling(void) {
+  g_status.priority_nice = BFPILOT_ARCHIVE_NICE;
+  errno = 0;
+  g_status.priority_rc = setpriority(PRIO_PROCESS, 0, BFPILOT_ARCHIVE_NICE);
+  g_status.priority_errno = g_status.priority_rc == 0 ? 0 : errno;
+  LogLine("archive scheduling nice=%d rc=%d errno=%d",
+          g_status.priority_nice, g_status.priority_rc,
+          g_status.priority_errno);
+}
+
+static unsigned long long
+TimevalUsec(const struct timeval &tv) {
+  return (unsigned long long)tv.tv_sec * 1000000ULL +
+         (unsigned long long)tv.tv_usec;
+}
+
+static void
 WriteStatus(bool force) {
   long now = NowMs();
   if(!force && now > 0 && g_last_status_ms > 0 &&
@@ -354,13 +470,81 @@ WriteStatus(bool force) {
       g_status.started_ms > 0 && now > g_status.started_ms
           ? now - g_status.started_ms
           : 0;
+  unsigned long long input_bytes = g_io_input_bytes.load();
+  unsigned long long output_bytes = g_io_output_bytes.load();
+  unsigned long long input_ops = g_io_input_ops.load();
+  unsigned long long output_ops = g_io_output_ops.load();
+  unsigned long long input_usec = g_io_input_usec.load();
+  unsigned long long output_usec = g_io_output_usec.load();
+  unsigned long long rate_bytes =
+      output_bytes > 0 ? output_bytes:g_status.bytes_written;
   double mbps =
       elapsed_ms > 0
-          ? ((double)g_status.bytes_written * 1000.0 / (double)elapsed_ms) /
+          ? ((double)rate_bytes * 1000.0 / (double)elapsed_ms) /
                 (1024.0 * 1024.0)
           : 0.0;
+  double input_mbps =
+      elapsed_ms > 0
+          ? ((double)input_bytes * 1000.0 / (double)elapsed_ms) /
+                (1024.0 * 1024.0)
+          : 0.0;
+  double output_mbps =
+      elapsed_ms > 0
+          ? ((double)output_bytes * 1000.0 / (double)elapsed_ms) /
+                (1024.0 * 1024.0)
+          : 0.0;
+  double input_wait_mbps =
+      input_usec > 0
+          ? ((double)input_bytes * 1000000.0 / (double)input_usec) /
+                (1024.0 * 1024.0)
+          : 0.0;
+  double output_wait_mbps =
+      output_usec > 0
+          ? ((double)output_bytes * 1000000.0 / (double)output_usec) /
+                (1024.0 * 1024.0)
+          : 0.0;
+  unsigned long long cpu_user_ms = 0;
+  unsigned long long cpu_system_ms = 0;
+  unsigned long long cpu_total_ms = 0;
+  double cpu_util_percent = 0.0;
+  long voluntary_switches = 0;
+  long involuntary_switches = 0;
+  long max_rss = 0;
+  if(g_usage_started) {
+    struct rusage usage_now;
+    if(getrusage(RUSAGE_SELF, &usage_now) == 0) {
+      unsigned long long start_user = TimevalUsec(g_usage_start.ru_utime);
+      unsigned long long now_user = TimevalUsec(usage_now.ru_utime);
+      unsigned long long start_system = TimevalUsec(g_usage_start.ru_stime);
+      unsigned long long now_system = TimevalUsec(usage_now.ru_stime);
+      cpu_user_ms = now_user >= start_user ? (now_user - start_user) / 1000ULL : 0;
+      cpu_system_ms =
+          now_system >= start_system ? (now_system - start_system) / 1000ULL : 0;
+      cpu_total_ms = cpu_user_ms + cpu_system_ms;
+      cpu_util_percent = elapsed_ms > 0
+                             ? ((double)cpu_total_ms * 100.0) /
+                                   (double)elapsed_ms
+                             : 0.0;
+      voluntary_switches =
+          usage_now.ru_nvcsw >= g_usage_start.ru_nvcsw
+              ? usage_now.ru_nvcsw - g_usage_start.ru_nvcsw
+              : 0;
+      involuntary_switches =
+          usage_now.ru_nivcsw >= g_usage_start.ru_nivcsw
+              ? usage_now.ru_nivcsw - g_usage_start.ru_nivcsw
+              : 0;
+      max_rss = usage_now.ru_maxrss;
+    }
+  }
+  unsigned long long rar_mt_batches = g_rar_mt_batches.load();
+  unsigned long long rar_mt_threaded_batches =
+      g_rar_mt_threaded_batches.load();
+  unsigned long long rar_mt_blocks = g_rar_mt_blocks.load();
+  unsigned long long rar_mt_threaded_blocks =
+      g_rar_mt_threaded_blocks.load();
+  unsigned long long rar_mt_large_blocks = g_rar_mt_large_blocks.load();
 
-  char body[4096];
+  char body[8192];
 #ifdef BFPILOT_ARCHIVE_NO_MAIN
   const char *worker_name = "bfpilot-integrated-archive";
   const char *requires_injection = "false";
@@ -377,7 +561,20 @@ WriteStatus(bool force) {
       "\"percent\":%d,\"totalBytes\":%llu,\"bytesWritten\":%llu,"
       "\"filesDone\":%llu,\"totalFiles\":%llu,"
       "\"elapsedMs\":%ld,\"averageMBps\":%.2f,\"errno\":%d,"
-      "\"threads\":%u,\"threadMode\":\"%s\","
+      "\"threads\":%u,\"effectiveThreads\":%u,\"threadMode\":\"%s\","
+      "\"inputBytes\":%llu,\"outputBytes\":%llu,"
+      "\"inputOps\":%llu,\"outputOps\":%llu,"
+      "\"inputWaitMs\":%llu,\"outputWaitMs\":%llu,"
+      "\"inputMBps\":%.2f,\"outputMBps\":%.2f,"
+      "\"inputWaitMBps\":%.2f,\"outputWaitMBps\":%.2f,"
+      "\"cpuUserMs\":%llu,\"cpuSystemMs\":%llu,"
+      "\"cpuTotalMs\":%llu,\"cpuUtilPercent\":%.2f,"
+      "\"voluntarySwitches\":%ld,\"involuntarySwitches\":%ld,"
+      "\"maxRss\":%ld,"
+      "\"rarMtBatches\":%llu,\"rarMtThreadedBatches\":%llu,"
+      "\"rarMtBlocks\":%llu,\"rarMtThreadedBlocks\":%llu,"
+      "\"rarMtLargeBlocks\":%llu,"
+      "\"priorityNice\":%d,\"priorityRc\":%d,\"priorityErrno\":%d,"
       "\"archiveExitCode\":%d,"
       "\"requiresInjection\":%s}",
       worker_name,
@@ -391,7 +588,17 @@ WriteStatus(bool force) {
       g_status.percent, g_status.total_bytes, g_status.bytes_written,
       g_status.files_done, g_status.total_files, elapsed_ms, mbps,
       g_status.errno_code, g_status.threads,
+      g_status.effective_threads,
       g_status.threads == 0 ? "auto" : "manual",
+      input_bytes, output_bytes, input_ops, output_ops,
+      input_usec / 1000ULL, output_usec / 1000ULL,
+      input_mbps, output_mbps, input_wait_mbps, output_wait_mbps,
+      cpu_user_ms, cpu_system_ms, cpu_total_ms, cpu_util_percent,
+      voluntary_switches, involuntary_switches, max_rss,
+      rar_mt_batches, rar_mt_threaded_batches, rar_mt_blocks,
+      rar_mt_threaded_blocks, rar_mt_large_blocks,
+      g_status.priority_nice, g_status.priority_rc,
+      g_status.priority_errno,
       g_status.archive_exit_code, requires_injection);
   if(n < 0) return;
   size_t len = (size_t)std::min(n, (int)sizeof(body) - 1);
@@ -452,6 +659,28 @@ ReadSmallFile(const std::string &path, std::string &data, size_t max_size) {
   }
   close(fd);
   return true;
+}
+
+static bool
+TimedReadExact(int fd, void *data, size_t size) {
+  unsigned long long start = NowUsec();
+  bool ok = ReadExact(fd, data, size);
+  if(ok) {
+    unsigned long long end = NowUsec();
+    Ps5ArchiveInputSample((unsigned long long)size, end > start ? end - start : 0);
+  }
+  return ok;
+}
+
+static bool
+TimedWriteAll(int fd, const void *data, size_t size) {
+  unsigned long long start = NowUsec();
+  bool ok = WriteAll(fd, data, size);
+  if(ok) {
+    unsigned long long end = NowUsec();
+    Ps5ArchiveOutputSample((unsigned long long)size, end > start ? end - start : 0);
+  }
+  return ok;
 }
 
 static bool
@@ -519,6 +748,15 @@ enum ArchiveType {
   ARCHIVE_7Z,
   ARCHIVE_ZIP
 };
+
+static unsigned
+EffectiveArchiveThreadsForType(unsigned requested, ArchiveType type) {
+  unsigned threads = EffectiveArchiveThreads(requested);
+  if(type == ARCHIVE_RAR && threads > BFPILOT_ARCHIVE_RAR_MAX_THREADS) {
+    return BFPILOT_ARCHIVE_RAR_MAX_THREADS;
+  }
+  return threads;
+}
 
 static const char *
 ArchiveTypeName(ArchiveType type) {
@@ -631,7 +869,7 @@ RunUnrarExtract(const std::string &archive_path, const std::string &dest_path,
   cmd->DisableCopyright = true;
   cmd->DisableDone = true;
   cmd->DisableNames = true;
-  if(threads > 0) cmd->Threads = std::min<uint>(threads, MaxPoolThreads);
+  cmd->Threads = std::min<uint>(threads > 0 ? threads : 1, MaxPoolThreads);
 
   if(!password.empty()) {
     std::wstring password_w;
@@ -961,12 +1199,12 @@ WriteZipStoredFile(int zip_fd, int out_fd, ZipEntry &entry,
   while(remaining > 0) {
     size_t want =
         (size_t)std::min<unsigned long long>(remaining, buf.size());
-    if(!ReadExact(zip_fd, buf.data(), want)) {
+    if(!TimedReadExact(zip_fd, buf.data(), want)) {
       error = "failed to read stored zip data";
       return false;
     }
     if(crypto) crypto->decrypt_buffer(buf.data(), want);
-    if(!WriteAll(out_fd, buf.data(), want)) {
+    if(!TimedWriteAll(out_fd, buf.data(), want)) {
       error = "failed to write extracted zip file";
       return false;
     }
@@ -1022,7 +1260,7 @@ WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
     if(stream.avail_in == 0 && remaining > 0) {
       size_t want =
           (size_t)std::min<unsigned long long>(remaining, inbuf.size());
-      if(!ReadExact(zip_fd, inbuf.data(), want)) {
+      if(!TimedReadExact(zip_fd, inbuf.data(), want)) {
         error = "failed to read deflated zip data";
         ok = false;
         break;
@@ -1038,7 +1276,7 @@ WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
     zrc = mz_inflate(&stream, remaining == 0 ? MZ_FINISH : MZ_NO_FLUSH);
     size_t produced = outbuf.size() - stream.avail_out;
     if(produced > 0) {
-      if(!WriteAll(out_fd, outbuf.data(), produced)) {
+      if(!TimedWriteAll(out_fd, outbuf.data(), produced)) {
         error = "failed to write extracted zip file";
         ok = false;
         break;
@@ -1234,12 +1472,14 @@ RunZipExtract(const std::string &archive_path, const std::string &dest_path,
 static int
 RunArchive(const ArchiveConfig &cfg, ArchiveType type, std::string &error) {
   if(type == ARCHIVE_RAR) {
+    g_status.effective_threads =
+        EffectiveArchiveThreadsForType(cfg.threads, type);
     g_status.total_bytes = 0;
     g_status.total_files = 0;
     WriteStatus(true);
     errno = 0;
     int code = RunUnrarExtract(cfg.source, g_status.stage, cfg.password,
-                               cfg.threads);
+                               g_status.effective_threads);
     if(code != RARX_SUCCESS && code != RARX_WARNING) {
       error = RarExitDiagnostic((RAR_EXIT)code, !cfg.password.empty());
       return code;
@@ -1249,12 +1489,15 @@ RunArchive(const ArchiveConfig &cfg, ArchiveType type, std::string &error) {
   }
 
   if(type == ARCHIVE_7Z) {
+    g_status.effective_threads =
+        EffectiveArchiveThreadsForType(cfg.threads, type);
     g_status.total_bytes = 0;
     g_status.total_files = 0;
     WriteStatus(true);
     errno = 0;
     SevenZExtractResult result =
-        Run7zExtract(cfg.source, g_status.stage, cfg.password, cfg.threads);
+        Run7zExtract(cfg.source, g_status.stage, cfg.password,
+                     g_status.effective_threads);
     if(result.code != RARX_SUCCESS && result.code != RARX_WARNING) {
       error = result.reason;
       if(!result.missing_volume.empty()) {
@@ -1268,6 +1511,7 @@ RunArchive(const ArchiveConfig &cfg, ArchiveType type, std::string &error) {
   }
 
   if(type == ARCHIVE_ZIP) {
+    g_status.effective_threads = 1;
     errno = 0;
     return RunZipExtract(cfg.source, g_status.stage, cfg.password, error) ? 0
                                                                          : 1;
@@ -1284,11 +1528,15 @@ bfpilot_archive_run_prepared_job(void) {
   g_status.percent = 0;
   g_status.archive_exit_code = 0;
   g_status.errno_code = 0;
+  g_status.priority_nice = 0;
+  g_status.priority_rc = 0;
+  g_status.priority_errno = 0;
   g_status.total_bytes = 0;
   g_status.bytes_written = 0;
   g_status.files_done = 0;
   g_status.total_files = 0;
   g_status.threads = 0;
+  g_status.effective_threads = 0;
   g_status.source.clear();
   g_status.destination.clear();
   g_status.stage.clear();
@@ -1297,8 +1545,11 @@ bfpilot_archive_run_prepared_job(void) {
   g_status.archive_type.clear();
   g_last_status_ms = 0;
   g_last_progress = -1;
+  ResetIoCounters();
   WriteStatus(true);
   LogLine("archive job entry reached");
+  ApplyArchiveScheduling();
+  WriteStatus(true);
 
   ArchiveConfig cfg;
   std::string error;
@@ -1367,11 +1618,18 @@ bfpilot_archive_run_prepared_job(void) {
 
   ArchiveType type = DetectArchiveType(cfg.source);
   g_status.archive_type = ArchiveTypeName(type);
+  if(type == ARCHIVE_RAR || type == ARCHIVE_7Z) {
+    g_status.effective_threads =
+        EffectiveArchiveThreadsForType(cfg.threads, type);
+  } else if(type == ARCHIVE_ZIP) {
+    g_status.effective_threads = 1;
+  }
   SetStatus("running", "extracting", true);
-  LogLine("extract start type=%s source=%s destination=%s stage=%s password=%s threads=%u mode=%s",
+  LogLine("extract start type=%s source=%s destination=%s stage=%s password=%s requested_threads=%u effective_threads=%u mode=%s",
           ArchiveTypeName(type), cfg.source.c_str(), cfg.destination.c_str(),
           g_status.stage.c_str(), cfg.password.empty() ? "empty" : "provided",
-          cfg.threads, cfg.threads == 0 ? "auto" : "manual");
+          cfg.threads, g_status.effective_threads,
+          cfg.threads == 0 ? "auto" : "manual");
 
   int rc = RunArchive(cfg, type, error);
   if(rc != 0) {
@@ -1416,6 +1674,46 @@ bfpilot_archive_run_prepared_job(void) {
   return 0;
 }
 
+static bool
+StatusLooksInterrupted(const std::string &status) {
+  return status.find("\"state\":\"starting\"") != std::string::npos ||
+         status.find("\"state\":\"running\"") != std::string::npos ||
+         status.find("\"state\":\"finalizing\"") != std::string::npos;
+}
+
+static void
+MarkInterruptedArchiveStatus(const std::string &old_status) {
+  g_status.state = "error";
+  g_status.started_ms = NowMs();
+  g_status.percent = 0;
+  g_status.archive_exit_code = RARX_USERBREAK;
+  g_status.errno_code = EINTR;
+  g_status.priority_nice = 0;
+  g_status.priority_rc = 0;
+  g_status.priority_errno = 0;
+  g_status.total_bytes = 0;
+  g_status.bytes_written = 0;
+  g_status.files_done = 0;
+  g_status.total_files = 0;
+  g_status.threads = 0;
+  g_status.effective_threads = 0;
+  g_status.source.clear();
+  g_status.destination.clear();
+  g_status.stage.clear();
+  g_status.current = "previous archive job interrupted";
+  g_status.error =
+      "previous archive job was interrupted; inspect logs and any "
+      ".bfpilot-extracting staging folder before cleanup";
+  g_status.archive_type = "unknown";
+  g_last_status_ms = 0;
+  g_last_progress = -1;
+  ResetIoCounters();
+  WriteStatus(true);
+
+  std::string sample = old_status.substr(0, 1200);
+  LogLine("archive interrupted status recovered old_status=%s", sample.c_str());
+}
+
 static int
 ArchiveDaemonMain(pid_t parent_pid) {
   if(!MkdirAll(BFPILOT_ARCHIVE_DIR)) {
@@ -1458,6 +1756,13 @@ ArchiveDaemonMain(pid_t parent_pid) {
 
   LogLine("archive daemon started pid=%ld parent=%ld",
           (long)getpid(), (long)parent_pid);
+
+  std::string startup_status;
+  if(ReadSmallFile(BFPILOT_ARCHIVE_STATUS, startup_status, 32768) &&
+     StatusLooksInterrupted(startup_status)) {
+    MarkInterruptedArchiveStatus(startup_status);
+  }
+
   std::string last_job;
   for(;;) {
     if(parent_pid > 1 && getppid() != parent_pid) {

@@ -1219,6 +1219,11 @@
       }
       if (pct > 0) parts.push(Math.max(0, Math.min(100, pct)).toFixed(0) + '%');
       if (job.averageMBps > 0) parts.push(Number(job.averageMBps).toFixed(2) + ' MB/s');
+      if (job.cpuUtilPercent > 0) parts.push('CPU ' + Number(job.cpuUtilPercent).toFixed(0) + '%');
+      if (job.outputWaitMBps > 0) parts.push('write ' + Number(job.outputWaitMBps).toFixed(1) + ' MB/s');
+      if (job.rarMtBlocks > 0 && Number(job.effectiveThreads || 0) > 1) {
+        parts.push('MT ' + Number(job.rarMtThreadedBlocks || 0) + '/' + Number(job.rarMtBlocks || 0));
+      }
       if (job.filesDone || job.totalFiles) {
         parts.push(Number(job.filesDone || 0) + ' / ' + Number(job.totalFiles || 0) + ' files');
       }

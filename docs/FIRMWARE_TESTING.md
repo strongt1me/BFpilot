@@ -7,6 +7,35 @@ Remote diagnostics are read-only unless benchmark mode is explicitly enabled.
 Benchmark mode writes only timestamped BFpilot-owned files under
 `/data/test/bfpilot-bench` and does not delete remote files.
 
+## Connectivity Loss Rule
+
+If the PS5 is reachable before a BFpilot deployment or archive test and then
+`5905`, `9021`, or ping access disappears immediately after that action, treat
+it as a possible payload crash, loader crash, or kernel panic until proven
+otherwise. Do not assume it is a normal network issue. Record the exact binary,
+build tag, endpoint or payload command, archive path, thread count, status JSON,
+and last BFpilot log files that were visible before the drop. After the console
+comes back, restart with read-only diagnostics before any new write test.
+
+### 2026-06-30 large archive incident
+
+- Build: `bfpilot-v0.3.1-test6-perf5`.
+- Command: `scripts/ps5_archive_perf.py` against `<PS5_IP>:5905`.
+- Archive: `/tmp/bfpilot-archive-tests/large1100m-pw.rar`, about 1.1 GiB,
+  stored RAR with password `testpass`.
+- Remote test root:
+  `/data/BFpilot/bfpilot-archive-perf-20260630T113254Z-22970`.
+- Flow completed support check, mkdir, upload, archive prepare, and one
+  successful archive-status poll. Shortly after extraction started, archive
+  status timed out, then ping, port `5905`, and loader port `9021` became
+  unreachable.
+- Treat this as a likely payload crash or kernel panic until logs can be read
+  after reboot. Do not resume large RAR tests with automatic multi-threading;
+  restart with read-only diagnostics, collect `/data/BFpilot/log.txt`,
+  `/data/BFpilot/boot.log`, and
+  `/data/BFpilot/archive-integrated/archive-worker.log`, then test a smaller
+  RAR with one extraction thread before increasing size or thread count.
+
 ## 1. Build Locally
 
 ```sh
@@ -172,10 +201,42 @@ curl -X POST "http://$PS5_IP:${BF_WEB_PORT:-5905}/api/fs/archive/prepare" \
 curl "http://$PS5_IP:${BF_WEB_PORT:-5905}/api/fs/archive/status"
 ```
 
-Use `threads=0` for the default automatic archive-engine setting. For
-performance diagnostics, repeat only BFpilot-owned test archives with
-`threads=1`, `threads=2`, `threads=4`, and `threads=8`, then compare the
-reported `averageMBps` and elapsed time.
+Use `threads=0` for the default automatic archive-engine setting. 7z auto mode
+is conservatively capped at 2 effective threads. RAR is clamped to
+`effectiveThreads=1` until large-archive PS5 stability is proven after the
+`bfpilot-v0.3.1-test6-perf5` crash incident above. For performance diagnostics,
+repeat only BFpilot-owned test archives and start with `threads=1`; do not raise
+RAR thread counts until small and 1 GiB single-thread tests complete without
+HTTP timeouts, payload crashes, or console reboot. Compare `averageMBps`,
+`effectiveThreads`, elapsed time, `cpuUtilPercent`, the input/output timing
+counters, RAR `rarMtThreadedBlocks`/`rarMtLargeBlocks`, and
+`priorityRc`/`priorityErrno`. Preserve the archive log/status files for any
+timeout or connectivity loss.
+
+Interpretation:
+
+- high `cpuUtilPercent` with low IO wait usually means decompression is the
+  bottleneck.
+- low `rarMtThreadedBlocks` with `effectiveThreads` above 1 means the RAR
+  stream is effectively serial or forced into large-block fallback.
+- low `outputWaitMBps` means destination writes are throttling extraction.
+- low `inputWaitMBps` means source reads are throttling extraction.
+
+For repeatable performance runs, use:
+
+```sh
+BF_ALLOW_PS5_WRITE=1 \
+BF_ARCHIVE_LOCAL=/path/to/test.rar \
+BF_ARCHIVE_PASSWORD='optional-password' \
+BF_ARCHIVE_THREADS=0,1,2 \
+PS5_IP="$PS5_IP" BF_WEB_PORT="${BF_WEB_PORT:-5905}" \
+make ps5-archive-perf
+```
+
+The harness writes only under a BFpilot-owned test directory, saves
+`diagnostics/ps5-archive-perf-*.json`, and cleans up its own test directory by
+default. Run higher thread counts only after the default matrix completes
+without timeouts or reboots.
 
 Expected endpoints:
 

@@ -276,7 +276,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    host = os.environ.get("PS5_IP", "192.168.1.204")
+    host = os.environ.get("PS5_IP", "192.168.1.100")
     port = os.environ.get("BF_WEB_PORT", "5905")
     base = f"http://{host}:{port}"
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

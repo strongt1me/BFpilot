@@ -104,7 +104,7 @@ def main() -> int:
         print("FAIL BF_ALLOW_PS5_WRITE must be 1 for smoke tests", file=sys.stderr)
         return 2
 
-    host = os.environ.get("PS5_IP", "192.168.1.204")
+    host = os.environ.get("PS5_IP", "192.168.1.100")
     port = os.environ.get("BF_WEB_PORT", "5905")
     base = f"http://{host}:{port}"
     parent = os.environ.get("BF_TEST_REMOTE_ROOT", "/data/test").rstrip("/")

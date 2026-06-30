@@ -1,5 +1,9 @@
 #include "rar.hpp"
 
+#ifdef PS5_PAYLOAD
+extern "C" bool Ps5UnrarFlushBufferedOutput(File *DestFile);
+#endif
+
 File::File()
 {
   hFile=FILE_BAD_HANDLE;
@@ -34,6 +38,10 @@ File::~File()
 
 void File::operator = (File &SrcFile)
 {
+#ifdef PS5_PAYLOAD
+  Ps5UnrarFlushBufferedOutput(this);
+  Ps5UnrarFlushBufferedOutput(&SrcFile);
+#endif
   hFile=SrcFile.hFile;
   NewFile=SrcFile.NewFile;
   LastWrite=SrcFile.LastWrite;
@@ -252,6 +260,9 @@ bool File::Close()
   {
     if (!SkipClose)
     {
+#ifdef PS5_PAYLOAD
+      bool FlushSuccess=Ps5UnrarFlushBufferedOutput(this);
+#endif
 #ifdef _WIN_ALL
       // We use the standard system handle for stdout in Windows
       // and it must not be closed here.
@@ -263,6 +274,9 @@ bool File::Close()
 #else
       Success=fclose(hFile)!=EOF;
 #endif
+#endif
+#ifdef PS5_PAYLOAD
+      Success=FlushSuccess && Success;
 #endif
     }
     hFile=FILE_BAD_HANDLE;
@@ -453,6 +467,10 @@ int File::Read(void *Data,size_t Size)
 // Returns -1 in case of error.
 int File::DirectRead(void *Data,size_t Size)
 {
+#ifdef PS5_PAYLOAD
+  if (!Ps5UnrarFlushBufferedOutput(this))
+    return -1;
+#endif
 #ifdef _WIN_ALL
   const size_t MaxDeviceRead=20000;
   const size_t MaxLockedRead=32768;
@@ -528,6 +546,10 @@ bool File::RawSeek(int64 Offset,int Method)
 {
   if (hFile==FILE_BAD_HANDLE)
     return true;
+#ifdef PS5_PAYLOAD
+  if (!Ps5UnrarFlushBufferedOutput(this))
+    return false;
+#endif
   if (!IsSeekable()) // To extract archives from stdin with -si.
   {
     // We tried to dynamically allocate 32 KB buffer here, but it improved
@@ -651,6 +673,10 @@ void File::PutByte(byte Byte)
 
 bool File::Truncate()
 {
+#ifdef PS5_PAYLOAD
+  if (!Ps5UnrarFlushBufferedOutput(this))
+    return false;
+#endif
 #ifdef _WIN_ALL
   return SetEndOfFile(hFile)!=FALSE;
 #else
@@ -661,6 +687,9 @@ bool File::Truncate()
 
 void File::Flush()
 {
+#ifdef PS5_PAYLOAD
+  Ps5UnrarFlushBufferedOutput(this);
+#endif
 #ifdef _WIN_ALL
   FlushFileBuffers(hFile);
 #else
@@ -674,6 +703,9 @@ void File::Flush()
 
 void File::SetOpenFileTime(RarTime *ftm,RarTime *ftc,RarTime *fta)
 {
+#ifdef PS5_PAYLOAD
+  Ps5UnrarFlushBufferedOutput(this);
+#endif
 #ifdef _WIN_ALL
   // Workaround for OpenIndiana NAS time bug. If we cannot create a file
   // in write only mode, we need to flush the write buffer before calling

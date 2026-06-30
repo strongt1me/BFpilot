@@ -46,27 +46,27 @@ launcher installer payload only if you want the tile.
 Inject the file manager payload to your loader, usually on port `9021`:
 
 ```sh
-python3 payload_sender.py 192.168.1.204 9021 bfpilot.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot.elf
 ```
 
 Open:
 
 ```text
-http://192.168.1.204:5905/
+http://<PS5_IP>:5905/
 ```
 
 Health checks:
 
 ```text
-http://192.168.1.204:5905/api/status
-http://192.168.1.204:5905/api/diag
-http://192.168.1.204:5905/api/fs/places
+http://<PS5_IP>:5905/api/status
+http://<PS5_IP>:5905/api/diag
+http://<PS5_IP>:5905/api/fs/places
 ```
 
 Install or refresh the launcher tile:
 
 ```sh
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-launcher-installer.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-launcher-installer.elf
 ```
 
 The tile opens:
@@ -93,7 +93,7 @@ From the web UI:
 The UI polls:
 
 ```text
-http://192.168.1.204:5905/api/fs/archive/status
+http://<PS5_IP>:5905/api/fs/archive/status
 ```
 
 Supported today:
@@ -104,10 +104,15 @@ Supported today:
 - ZIP stored/deflate entries, ZIP64 sizes/offsets, and traditional ZipCrypto
   passwords.
 
-Extraction uses automatic archive-engine threading by default. The archive API
-accepts `threads=0` for automatic tuning, or `threads=1..8` for manual
-benchmarking. Status responses include `threads`, `threadMode`, elapsed time,
-and average MB/s.
+Extraction uses conservative archive-engine threading by default. The archive
+API accepts `threads=0` for automatic tuning. 7z auto mode is currently capped
+at 2 effective threads; RAR is clamped to 1 effective thread until large-archive
+PS5 stability is proven after the `perf5` crash investigation. Status responses
+include `threads`, `effectiveThreads`, `threadMode`, elapsed time, average MB/s,
+input/output timing counters, and best-effort archive priority fields. RAR
+status also reports thread-pool counters such as `rarMtThreadedBlocks` and
+`rarMtLargeBlocks` for diagnostics, but normal RAR extraction should report
+`effectiveThreads=1` for now.
 
 Known limits:
 
@@ -145,21 +150,21 @@ but it must remain launcher-free.
 Local read-only diagnostics:
 
 ```sh
-PS5_IP=192.168.1.204 BF_WEB_PORT=5905 make ps5-diag
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 make ps5-diag
 ```
 
 Read-only storage accounting audit for Settings/BFpilot free-space mismatches:
 
 ```sh
-PS5_IP=192.168.1.204 BF_WEB_PORT=5905 make ps5-storage-audit
-PS5_IP=192.168.1.204 BF_WEB_PORT=5905 \
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 make ps5-storage-audit
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
 python3 scripts/ps5_storage_audit.py --deep --settings-free-gb 18
 ```
 
 Smoke test the file APIs using only BFpilot-created files under `/data/test`:
 
 ```sh
-PS5_IP=192.168.1.204 BF_WEB_PORT=5905 \
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
 BF_ALLOW_PS5_WRITE=1 \
 make ps5-smoke
 ```
@@ -167,11 +172,28 @@ make ps5-smoke
 Optional benchmark mode writes under `/data/test/bfpilot-bench` by default:
 
 ```sh
-PS5_IP=192.168.1.204 BF_WEB_PORT=5905 \
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
 BF_ALLOW_PS5_WRITE=1 \
 BF_ALLOWED_REMOTE_ROOTS=/data/test/bfpilot-bench \
 python3 scripts/ps5_diag.py --bench
 ```
+
+Archive performance harness:
+
+```sh
+BF_ALLOW_PS5_WRITE=1 \
+BF_ARCHIVE_LOCAL=/path/to/test.rar \
+BF_ARCHIVE_PASSWORD='optional-password' \
+BF_ARCHIVE_THREADS=0,1,2 \
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
+make ps5-archive-perf
+```
+
+The harness uploads the archive once under a BFpilot-owned test folder,
+extracts to separate destinations for each requested thread count, saves
+`diagnostics/ps5-archive-perf-*.json`, captures archive logs, and deletes only
+its own test folder by default. Use manual thread counts above 2 only for
+controlled stability testing.
 
 Runtime logs are stored on the PS5 at:
 

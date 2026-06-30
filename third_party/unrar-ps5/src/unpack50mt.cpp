@@ -3,6 +3,12 @@
 #define UNP_READ_SIZE_MT        0x400000
 #define UNP_BLOCKS_PER_THREAD          2
 
+#ifdef PS5_PAYLOAD
+extern "C" void Ps5ArchiveRarMtSample(unsigned Blocks,
+                                      unsigned ThreadedBlocks,
+                                      unsigned LargeBlocks,
+                                      unsigned ThreadedBatch);
+#endif
 
 struct UnpackThreadDataList
 {
@@ -196,6 +202,15 @@ void Unpack::Unpack5MT(bool Solid)
 
       if (BlockNumber==0)
         break;
+
+#ifdef PS5_PAYLOAD
+      uint LargeBlocks=0;
+      for (uint I=0;I<BlockNumber;I++)
+        if (UnpThreadData[I].LargeBlock)
+          LargeBlocks++;
+      Ps5ArchiveRarMtSample(BlockNumber,BlockNumberMT,LargeBlocks,
+                            BlockNumber!=1 && BlockNumberMT>0 ? 1:0);
+#endif
 
 #ifdef USE_THREADS
       UnpThreadPool->WaitDone();

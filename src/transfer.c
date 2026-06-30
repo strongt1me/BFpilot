@@ -1871,7 +1871,17 @@ archive_support_handler(const http_request_t *req) {
       "\"zip\":\"ZipCrypto only; AES zip reports unsupported\"},"
       "\"multipart\":{\"rar\":true,\"7z.001\":true,"
       "\"zip\":false},"
-      "\"threading\":{\"default\":\"auto\",\"max\":8},"
+      "\"threading\":{\"default\":\"auto\",\"autoMax\":2,"
+      "\"manualMax\":8,\"statusField\":\"effectiveThreads\","
+      "\"formats\":{\"rar\":{\"autoMax\":1,\"manualMax\":1,"
+      "\"reason\":\"RAR multi-threaded extraction is disabled pending "
+      "large-archive PS5 stability validation\"},"
+      "\"7z\":{\"autoMax\":2,\"manualMax\":8},"
+      "\"zip\":{\"autoMax\":1,\"manualMax\":1}}},"
+      "\"scheduling\":{\"nice\":-10,\"bestEffort\":true},"
+      "\"telemetry\":[\"inputWaitMBps\",\"outputWaitMBps\","
+      "\"cpuUtilPercent\",\"rarMtThreadedBlocks\","
+      "\"rarMtLargeBlocks\"],"
       "\"allowedRoots\":[\"/data\",\"/mnt/usb0-7\",\"/mnt/ext0-7\"]}";
   return websrv_send(req->fd, 200, "application/json",
                      body, sizeof(body) - 1);

@@ -127,7 +127,7 @@ def run_bench(base: str) -> tuple[bool, object]:
 
 
 def main() -> int:
-    host = os.environ.get("PS5_IP", "192.168.1.204")
+    host = os.environ.get("PS5_IP", "192.168.1.100")
     port = os.environ.get("BF_WEB_PORT", "5905")
     allow_write = os.environ.get("BF_ALLOW_PS5_WRITE", "0") == "1"
     base = f"http://{host}:{port}"

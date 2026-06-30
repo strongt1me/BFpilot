@@ -40,8 +40,10 @@ Known limits:
 Host-verified changes on 2026-06-29:
 
 - Removed the BFpilot-side clamp that forced every archive job to
-  `threads=1`. Jobs now preserve `threads=0` as automatic engine tuning and
-  clamp manual values to `1..8`.
+  `threads=1`, then restored an RAR-specific effective clamp after a live
+  large-archive crash on `bfpilot-v0.3.1-test6-perf5`. Jobs still preserve the
+  requested `threads` value for diagnostics, but RAR currently runs with
+  `effectiveThreads=1`.
 - Removed the 7z adapter override that forced `mt=1`. The 7z handler now uses
   its automatic processor count unless a positive thread count is requested.
 - Increased ZIP stored/deflate I/O buffers from 128 KiB stack buffers to
@@ -51,22 +53,23 @@ Host-verified changes on 2026-06-29:
 - Archive status and logs now record `threads`, `threadMode`, elapsed time, and
   average MB/s for repeatable PS5 benchmarking.
 
-The PS5 was unavailable for live testing during this tuning pass. Next live
-validation should use the same archive set with `threads=0`, `1`, `2`, `4`, and
-`8`, then keep the fastest stable setting for each archive type. Do not
-benchmark user files; use BFpilot-owned paths under `/data/test`.
+Next live validation should restart with read-only diagnostics, collect the
+archive logs from the `perf5` incident, then run small and 1 GiB RAR tests at
+one effective thread before increasing any RAR thread count. 7z can still be
+benchmarked with conservative automatic threading. Do not benchmark user files;
+use BFpilot-owned paths under `/data/test` or `/data/BFpilot`.
 
 ## Live PS5 Results
 
-Target: `192.168.1.204`, web port `5905`, payload port `9021`.
+Target: `<PS5_IP>`, web port `5905`, payload port `9021`.
 
 Integrated one-ELF archive build on 2026-06-28:
 
 ```sh
 make clean all inspect-imports
-make deploy-bfpilot PS5_HOST=192.168.1.204 PS5_PORT=9021
-curl http://192.168.1.204:5905/api/fs/archive/support
-curl http://192.168.1.204:5905/api/fs/archive/status
+make deploy-bfpilot PS5_HOST=<PS5_IP> PS5_PORT=9021
+curl http://<PS5_IP>:5905/api/fs/archive/support
+curl http://<PS5_IP>:5905/api/fs/archive/status
 ```
 
 Result: passed locally and live. `bfpilot.elf` reported
@@ -113,9 +116,9 @@ Final isolated integrated-runtime validation on 2026-06-28:
 
 Full integrated archive validation on 2026-06-28:
 
-- Live target: `192.168.1.204`, web port `5905`, payload port `9021`.
+- Live target: `<PS5_IP>`, web port `5905`, payload port `9021`.
 - Build: `make all inspect-imports` after the integrated archive changes.
-- Deployment: `make deploy-bfpilot PS5_HOST=192.168.1.204 PS5_PORT=9021`.
+- Deployment: `make deploy-bfpilot PS5_HOST=<PS5_IP> PS5_PORT=9021`.
 - New file manager pid: `253`.
 - Integrated archive daemon pid: `254`.
 - `/api/fs/archive/support` reported `requiresInjection=false`.
@@ -198,10 +201,10 @@ installer imports, and `bfpilot-archive-worker.elf` contains no AppInst imports.
 Post-rebuild live reload:
 
 ```sh
-python3 payload_sender.py 192.168.1.204 9021 bfpilot.elf
-curl http://192.168.1.204:5905/api/status
-curl http://192.168.1.204:5905/api/diag
-curl http://192.168.1.204:5905/api/fs/archive/support
+python3 payload_sender.py <PS5_IP> 9021 bfpilot.elf
+curl http://<PS5_IP>:5905/api/status
+curl http://<PS5_IP>:5905/api/diag
+curl http://<PS5_IP>:5905/api/fs/archive/support
 ```
 
 Result: passed. The rebuilt file manager ran as `pid=185`, reported
@@ -211,7 +214,7 @@ archive support for `rar`, `7z`, `7z.001`, and `zip`.
 Post-rebuild file API smoke:
 
 ```sh
-PS5_IP=192.168.1.204 BF_WEB_PORT=5905 BF_ALLOW_PS5_WRITE=1 make ps5-smoke
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 BF_ALLOW_PS5_WRITE=1 make ps5-smoke
 ```
 
 Result: passed. The smoke test uploaded, downloaded, copied, renamed, moved,
@@ -228,7 +231,7 @@ POST /api/fs/archive/prepare
 src=/data/test/bfpilot-final-archive-smoke-20260619T111147Z.zip
 dst=/data/test/bfpilot-final-archive-smoke-20260619T111147Z-out
 
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-archive-worker.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-archive-worker.elf
 GET /api/fs/archive/status
 GET /fs/data/test/bfpilot-final-archive-smoke-20260619T111147Z-out/final-smoke/hello.txt
 ```
@@ -248,7 +251,7 @@ POST /api/fs/archive/prepare
 src=/data/test/bfpilot-zip-direntry-20260619T203300Z.zip
 dst=/data/test/bfpilot-zip-direntry-20260619T203300Z-out
 
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-archive-worker.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-archive-worker.elf
 GET /api/fs/archive/status
 GET /fs/data/test/bfpilot-zip-direntry-20260619T203300Z-out/dir/sub/hello.txt
 ```
@@ -263,7 +266,7 @@ Normal 7z:
 POST /api/fs/archive/prepare
 src=/data/test/bfpilot-20260619105720-plain.7z
 dst=/data/test/bfpilot-20260619105720-plain-7z-out
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-archive-worker.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-archive-worker.elf
 GET /api/fs/archive/status
 ```
 
@@ -277,7 +280,7 @@ POST /api/fs/archive/prepare
 src=/data/test/bfpilot-20260619105720-encrypted.7z
 dst=/data/test/bfpilot-20260619110357-encrypted-7z-pass-out
 password=testpass
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-archive-worker.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-archive-worker.elf
 GET /api/fs/archive/status
 ```
 
@@ -292,7 +295,7 @@ POST /api/fs/archive/prepare
 src=/data/test/bfpilot-20260619105720-encrypted.7z
 dst=/data/test/bfpilot-20260619110342-encrypted-7z-nopass-out
 password=
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-archive-worker.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-archive-worker.elf
 GET /api/fs/archive/status
 ```
 
@@ -305,7 +308,7 @@ Multipart 7z:
 POST /api/fs/archive/prepare
 src=/data/test/bfpilot-20260619105720-split.7z.001
 dst=/data/test/bfpilot-20260619105720-split-7z-out
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-archive-worker.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-archive-worker.elf
 GET /api/fs/archive/status
 ```
 
@@ -319,7 +322,7 @@ POST /api/fs/archive/prepare
 src=/data/test/PPSA04220-app0.rar
 dst=/data/test/bfpilot-20260619110408-PPSA04220-app0-rar-out
 password=
-python3 payload_sender.py 192.168.1.204 9021 bfpilot-archive-worker.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-archive-worker.elf
 GET /api/fs/archive/status
 ```
 
@@ -339,8 +342,8 @@ ZIP and ZipCrypto ZIP were validated earlier in the same live session:
 Standalone worker ZIP smoke:
 
 ```sh
-python3 payload_sender.py 192.168.1.204 9021 bfpilot.elf
-curl http://192.168.1.204:5907/api/fs/archive/support
+python3 payload_sender.py <PS5_IP> 9021 bfpilot.elf
+curl http://<PS5_IP>:5907/api/fs/archive/support
 POST /api/fs/upload
 POST /api/fs/archive/prepare
 GET /api/fs/archive/status
@@ -358,7 +361,7 @@ Final local rebuild after the UI wording cleanup:
 
 ```sh
 PS5_PAYLOAD_SDK=/home/blurf/PS5/ps5-payload-sdk make all inspect-imports
-PS5_IP=192.168.1.204 BF_WEB_PORT=5907 make ps5-diag
+PS5_IP=<PS5_IP> BF_WEB_PORT=5907 make ps5-diag
 ```
 
 Result: passed. The live archive worker endpoint reported

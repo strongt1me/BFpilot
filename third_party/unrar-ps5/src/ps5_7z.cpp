@@ -19,12 +19,26 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
 
 extern "C" void Ps5UnrarProgress(int Percent);
 extern "C" void Ps5ArchiveProgress64(unsigned long long Completed,
                                       unsigned long long Total);
+extern "C" void Ps5ArchiveInputSample(unsigned long long Bytes,
+                                      unsigned long long Usec);
+extern "C" void Ps5ArchiveOutputSample(unsigned long long Bytes,
+                                       unsigned long long Usec);
+
+static unsigned long long Ps5ArchiveNowUsec7z()
+{
+  struct timespec Ts;
+  if (clock_gettime(CLOCK_MONOTONIC,&Ts)!=0)
+    return 0;
+  return (unsigned long long)Ts.tv_sec*1000000ULL+
+         (unsigned long long)(Ts.tv_nsec/1000ULL);
+}
 
 using namespace NArchive;
 using namespace NWindows;
@@ -213,9 +227,20 @@ Z7_COM7F_IMF(CPosixInStream::Read(void *Data,UInt32 SizeToRead,UInt32 *Processed
     *ProcessedSize=0;
   if (SizeToRead==0)
     return S_OK;
-  ssize_t ReadSize=read(Fd,Data,SizeToRead);
+  unsigned long long Start=Ps5ArchiveNowUsec7z();
+  ssize_t ReadSize;
+  do
+  {
+    ReadSize=read(Fd,Data,SizeToRead);
+  } while (ReadSize<0 && errno==EINTR);
   if (ReadSize<0)
     return ErrnoToHresult();
+  if (ReadSize>0)
+  {
+    unsigned long long End=Ps5ArchiveNowUsec7z();
+    Ps5ArchiveInputSample((unsigned long long)ReadSize,
+                          End>Start ? End-Start:0);
+  }
   if (ProcessedSize)
     *ProcessedSize=(UInt32)ReadSize;
   return S_OK;
@@ -364,11 +389,19 @@ Z7_COM7F_IMF(CVolumeInStream::Read(void *Data,UInt32 SizeToRead,UInt32 *Processe
       return ErrnoToHresult();
     UInt64 Avail=Volumes[Index].size-LocalPos;
     UInt32 Cur=(UInt32)std::min<UInt64>(Avail,SizeToRead-Done);
-    ssize_t ReadSize=read(CurrentFd,(Byte *)Data+Done,Cur);
+    unsigned long long Start=Ps5ArchiveNowUsec7z();
+    ssize_t ReadSize;
+    do
+    {
+      ReadSize=read(CurrentFd,(Byte *)Data+Done,Cur);
+    } while (ReadSize<0 && errno==EINTR);
     if (ReadSize<0)
       return ErrnoToHresult();
     if (ReadSize==0)
       break;
+    unsigned long long End=Ps5ArchiveNowUsec7z();
+    Ps5ArchiveInputSample((unsigned long long)ReadSize,
+                          End>Start ? End-Start:0);
     Done+=(UInt32)ReadSize;
     Pos+=(UInt32)ReadSize;
   }
@@ -433,11 +466,26 @@ Z7_COM7F_IMF(CPosixOutStream::Write(const void *Data,UInt32 SizeToWrite,UInt32 *
     *ProcessedSize=0;
   if (SizeToWrite==0)
     return S_OK;
-  ssize_t Written=write(Fd,Data,SizeToWrite);
-  if (Written<0)
-    return ErrnoToHresult();
+  UInt32 Done=0;
+  while (Done<SizeToWrite)
+  {
+    unsigned long long Start=Ps5ArchiveNowUsec7z();
+    ssize_t Written=write(Fd,(const Byte *)Data+Done,SizeToWrite-Done);
+    if (Written<0)
+    {
+      if (errno==EINTR)
+        continue;
+      return ErrnoToHresult();
+    }
+    if (Written==0)
+      return E_FAIL;
+    unsigned long long End=Ps5ArchiveNowUsec7z();
+    Ps5ArchiveOutputSample((unsigned long long)Written,
+                           End>Start ? End-Start:0);
+    Done+=(UInt32)Written;
+  }
   if (ProcessedSize)
-    *ProcessedSize=(UInt32)Written;
+    *ProcessedSize=Done;
   return S_OK;
 }
 
@@ -668,12 +716,9 @@ static void Set7zProperties(IInArchive *Archive,uint Threads)
   if (!SetProperties)
     return;
 
-  if (Threads==0)
-    return;
-
   const wchar_t *Names[1]={ L"mt" };
   NCOM::CPropVariant Values[1];
-  Values[0]=(UInt32)std::min<uint>(Threads,8);
+  Values[0]=(UInt32)std::min<uint>(Threads>0 ? Threads:1,8);
   SetProperties->SetProperties(Names,Values,1);
 }
 

@@ -3,7 +3,7 @@
 SHELL := bash
 
 ifeq ($(strip $(PS5_PAYLOAD_SDK)),)
-ifeq ($(filter ps5-diag ps5-smoke ps5-storage-audit,$(MAKECMDGOALS)),)
+ifeq ($(filter ps5-diag ps5-smoke ps5-storage-audit ps5-archive-perf,$(MAKECMDGOALS)),)
 $(error PS5_PAYLOAD_SDK is required, e.g. export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk)
 endif
 else
@@ -21,7 +21,7 @@ PS5_PORT ?= 9021
 PYTHON ?= python3
 WEB_PORT ?= 5905
 
-VERSION_TAG := bfpilot-v0.3.1-test6
+VERSION_TAG := bfpilot-v0.3.1-test6-perf8
 BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 LLVM_CONFIG ?= $(if $(wildcard $(PS5_PAYLOAD_SDK)/bin/prospero-llvm-config),$(PS5_PAYLOAD_SDK)/bin/prospero-llvm-config,$(CURDIR)/build-tools/llvm-config)
@@ -143,18 +143,18 @@ COMMON_LDFLAGS := -Wl,--gc-sections -flto
 PRIVILEGED_APPINST_LDLIBS := -lkernel_sys -lSceSystemService
 PRIVILEGED_APPINST_LDLIBS += -lSceUserService -lSceAppInstUtil
 ARCHIVE_WORKER_DEFINES := -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_UNIX
-ARCHIVE_WORKER_DEFINES += -DPS5_PAYLOAD -DSILENT
+ARCHIVE_WORKER_DEFINES += -DPS5_PAYLOAD -DSILENT -DRAR_SMP -DNDEBUG
 ARCHIVE_SEVENZ_DEFINES := -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_UNIX
 ARCHIVE_SEVENZ_DEFINES += -DZ7_EXTRACT_ONLY -DZ7_PROG_VARIANT_R -DZ7_AFFINITY_DISABLE
 ARCHIVE_WORKER_INCLUDES := -I$(UNRAR_SRC_DIR) -I$(MINIZ_DIR)
 ARCHIVE_WORKER_INCLUDES += -I$(LZMA_C_DIR) -I$(LZMA_CPP_DIR) -I$(SEVENZ_DIR)
-ARCHIVE_WORKER_CXXFLAGS := -O2 -std=c++11 -Wall
+ARCHIVE_WORKER_CXXFLAGS := -O3 -std=c++11 -Wall
 ARCHIVE_WORKER_CXXFLAGS += -Wno-logical-op-parentheses -Wno-switch
 ARCHIVE_WORKER_CXXFLAGS += -Wno-dangling-else -Wno-unused-parameter -Wno-reorder
 ARCHIVE_WORKER_CXXFLAGS += -Wno-unused-function
 ARCHIVE_WORKER_CXXFLAGS += -Wno-unused-variable -Wno-unused-but-set-variable
 ARCHIVE_WORKER_CXXFLAGS += -Wno-missing-braces -Wno-nontrivial-memcall
-ARCHIVE_WORKER_CFLAGS := -O2 -Wall -Wno-unused-parameter
+ARCHIVE_WORKER_CFLAGS := -O3 -Wall -Wno-unused-parameter
 ARCHIVE_WORKER_LDFLAGS := -pthread -lSceNotification
 
 CC_CMD := "$(CC)"
@@ -274,8 +274,11 @@ ps5-smoke:
 ps5-storage-audit:
 	$(call run,$(PYTHON) scripts/ps5_storage_audit.py)
 
+ps5-archive-perf:
+	$(call run,$(PYTHON) scripts/ps5_archive_perf.py)
+
 clean:
 	$(call run,rm -rf $(BFPILOT_BIN) $(LAUNCHER_INSTALLER_BIN) $(ARCHIVE_WORKER_BIN) build gen)
 
 .SECONDARY: $(GEN_SRCS)
-.PHONY: all bfpilot launcher-installer archive-worker inspect-imports clean deploy-bfpilot deploy-launcher-installer ps5-diag ps5-smoke ps5-storage-audit
+.PHONY: all bfpilot launcher-installer archive-worker inspect-imports clean deploy-bfpilot deploy-launcher-installer ps5-diag ps5-smoke ps5-storage-audit ps5-archive-perf

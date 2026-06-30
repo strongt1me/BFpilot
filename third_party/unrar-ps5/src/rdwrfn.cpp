@@ -1,9 +1,115 @@
 #include "rar.hpp"
 
 #ifdef PS5_PAYLOAD
+#include <time.h>
 extern "C" void Ps5UnrarProgress(int Percent);
 extern "C" void Ps5ArchiveProgress64(unsigned long long Completed,
                                       unsigned long long Total);
+extern "C" void Ps5ArchiveInputSample(unsigned long long Bytes,
+                                      unsigned long long Usec);
+extern "C" void Ps5ArchiveOutputSample(unsigned long long Bytes,
+                                       unsigned long long Usec);
+
+static const size_t PS5_UNRAR_OUTPUT_BUFFER_SIZE=4U*1024U*1024U;
+static byte *Ps5UnrarOutputBuffer=NULL;
+static size_t Ps5UnrarOutputUsed=0;
+static File *Ps5UnrarOutputFile=NULL;
+static bool Ps5UnrarOutputFlushing=false;
+
+static unsigned long long Ps5ArchiveNowUsec()
+{
+  struct timespec Ts;
+  if (clock_gettime(CLOCK_MONOTONIC,&Ts)!=0)
+    return 0;
+  return (unsigned long long)Ts.tv_sec*1000000ULL+
+         (unsigned long long)(Ts.tv_nsec/1000ULL);
+}
+
+static bool Ps5UnrarFlushOutputFor(File *DestFile)
+{
+  if (Ps5UnrarOutputUsed==0 || DestFile==NULL ||
+      Ps5UnrarOutputFile!=DestFile)
+    return true;
+
+  if (Ps5UnrarOutputFlushing)
+    return true;
+
+  Ps5UnrarOutputFlushing=true;
+  unsigned long long WriteStart=Ps5ArchiveNowUsec();
+  size_t WriteSize=Ps5UnrarOutputUsed;
+  bool WriteOk=DestFile->Write(Ps5UnrarOutputBuffer,WriteSize);
+  if (WriteOk)
+  {
+    unsigned long long WriteEnd=Ps5ArchiveNowUsec();
+    Ps5ArchiveOutputSample((unsigned long long)WriteSize,
+                           WriteEnd>WriteStart ? WriteEnd-WriteStart:0);
+    Ps5UnrarOutputUsed=0;
+  }
+  Ps5UnrarOutputFlushing=false;
+  return WriteOk;
+}
+
+extern "C" bool Ps5UnrarFlushBufferedOutput(File *DestFile)
+{
+  if (DestFile!=NULL && Ps5UnrarOutputFile!=DestFile)
+    return true;
+
+  File *FlushFile=DestFile!=NULL ? DestFile:Ps5UnrarOutputFile;
+  bool Ok=Ps5UnrarFlushOutputFor(FlushFile);
+  if (Ok && (DestFile==NULL || Ps5UnrarOutputFile==DestFile))
+    Ps5UnrarOutputFile=NULL;
+  return Ok;
+}
+
+static bool Ps5UnrarWriteOutput(File *DestFile,byte *Addr,size_t Count)
+{
+  if (Count==0)
+    return true;
+  if (DestFile==NULL)
+    return false;
+
+  if (Ps5UnrarOutputFile!=NULL && Ps5UnrarOutputFile!=DestFile)
+    if (!Ps5UnrarFlushOutputFor(Ps5UnrarOutputFile))
+      return false;
+
+  Ps5UnrarOutputFile=DestFile;
+
+  if (Count>=PS5_UNRAR_OUTPUT_BUFFER_SIZE)
+  {
+    if (!Ps5UnrarFlushOutputFor(DestFile))
+      return false;
+
+    Ps5UnrarOutputFlushing=true;
+    unsigned long long WriteStart=Ps5ArchiveNowUsec();
+    bool WriteOk=DestFile->Write(Addr,Count);
+    if (WriteOk)
+    {
+      unsigned long long WriteEnd=Ps5ArchiveNowUsec();
+      Ps5ArchiveOutputSample((unsigned long long)Count,
+                             WriteEnd>WriteStart ? WriteEnd-WriteStart:0);
+    }
+    Ps5UnrarOutputFlushing=false;
+    return WriteOk;
+  }
+
+  if (Ps5UnrarOutputBuffer==NULL)
+  {
+    Ps5UnrarOutputBuffer=(byte *)malloc(PS5_UNRAR_OUTPUT_BUFFER_SIZE);
+    if (Ps5UnrarOutputBuffer==NULL)
+    {
+      ErrHandler.MemoryError();
+      return false;
+    }
+  }
+
+  if (Ps5UnrarOutputUsed+Count>PS5_UNRAR_OUTPUT_BUFFER_SIZE)
+    if (!Ps5UnrarFlushOutputFor(DestFile))
+      return false;
+
+  memcpy(Ps5UnrarOutputBuffer+Ps5UnrarOutputUsed,Addr,Count);
+  Ps5UnrarOutputUsed+=Count;
+  return true;
+}
 #endif
 
 ComprDataIO::ComprDataIO()
@@ -104,7 +210,19 @@ int ComprDataIO::UnpRead(byte *Addr,size_t Count)
 
         if (!SrcFile->IsOpened())
           return -1;
+        #ifdef PS5_PAYLOAD
+        unsigned long long Ps5ReadStart=Ps5ArchiveNowUsec();
+        #endif
         ReadSize=SrcFile->Read(ReadAddr,SizeToRead);
+        #ifdef PS5_PAYLOAD
+        if (ReadSize>0)
+        {
+          unsigned long long Ps5ReadEnd=Ps5ArchiveNowUsec();
+          Ps5ArchiveInputSample((unsigned long long)ReadSize,
+                                Ps5ReadEnd>Ps5ReadStart ?
+                                  Ps5ReadEnd-Ps5ReadStart:0);
+        }
+        #endif
         FileHeader *hd=SubHead!=NULL ? SubHead:&SrcArc->FileHead;
         if (!NoFileHeader && hd->SplitAfter)
           PackedDataHash.Update(ReadAddr,ReadSize);
@@ -189,7 +307,19 @@ void ComprDataIO::UnpWrite(byte *Addr,size_t Count)
   }
   else
     if (!TestMode)
-      DestFile->Write(Addr,Count);
+    {
+      #ifdef PS5_PAYLOAD
+      bool Ps5WriteOk=Ps5UnrarWriteOutput(DestFile,Addr,Count);
+      #else
+      bool Ps5WriteOk=DestFile->Write(Addr,Count);
+      #endif
+      if (!Ps5WriteOk)
+      {
+        std::wstring EmptyName;
+        ErrHandler.WriteError(EmptyName,
+                              DestFile!=NULL ? DestFile->FileName:EmptyName);
+      }
+    }
   CurUnpWrite+=Count;
   if (!SkipUnpCRC)
     UnpHash.Update(Addr,Count);

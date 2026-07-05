@@ -24,9 +24,12 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <pthread_np.h>
 #include <memory>
 #include <string>
+#include <sys/cpuset.h>
 #include <sys/file.h>
+#include <sys/param.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -2097,8 +2100,19 @@ bfpilot_archive_start_daemon(void) {
     LogLine("archive daemon thread creation failed errno=%d", errno);
     return -errno;
   }
+
+  // Pin archive extraction to PS5 background core (Core 6)
+  cpuset_t mask;
+  CPU_ZERO(&mask);
+  CPU_SET(6, &mask);
+  int aff_rc = pthread_setaffinity_np(thread, sizeof(cpuset_t), &mask);
+  if (aff_rc != 0) {
+    LogLine("archive daemon setaffinity failed rc=%d", aff_rc);
+  } else {
+    LogLine("archive daemon thread started and pinned to core 6");
+  }
+
   pthread_detach(thread);
-  LogLine("archive daemon thread started");
   return 0;
 }
 

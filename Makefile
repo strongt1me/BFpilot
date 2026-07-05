@@ -122,7 +122,7 @@ BFPILOT_ARCHIVE_OBJS := $(patsubst %.cpp,build/bfpilot-archive/%.o,$(ARCHIVE_WOR
 BFPILOT_ARCHIVE_OBJS += $(patsubst %.c,build/bfpilot-archive/%.o,$(ARCHIVE_SEVENZ_C_SRCS))
 
 COMMON_CFLAGS := -Os -Wall -Werror -Isrc
-COMMON_CFLAGS += -ffunction-sections -fdata-sections -flto
+COMMON_CFLAGS += -ffunction-sections -fdata-sections
 COMMON_CFLAGS += -DVERSION_TAG=\"$(VERSION_TAG)\"
 COMMON_CFLAGS += -DBUILD_VERSION=\"$(BUILD_VERSION)\"
 COMMON_CFLAGS += -DBFPILOT_SDK_PATH=\"$(PS5_PAYLOAD_SDK)\"
@@ -140,7 +140,7 @@ LAUNCHER_INSTALLER_CFLAGS := $(COMMON_CFLAGS)
 LAUNCHER_INSTALLER_CFLAGS += -DBFPILOT_PAYLOAD_NAME=\"bfpilot-launcher-installer\"
 LAUNCHER_INSTALLER_CFLAGS += -DBFPILOT_BUILD_MODE=\"launcher-installer-force\"
 
-COMMON_LDFLAGS := -Wl,--gc-sections -flto
+COMMON_LDFLAGS := -Wl,--gc-sections
 PRIVILEGED_APPINST_LDLIBS := -lkernel_sys -lSceSystemService
 PRIVILEGED_APPINST_LDLIBS += -lSceUserService -lSceAppInstUtil
 ARCHIVE_WORKER_DEFINES := -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_UNIX
@@ -158,8 +158,8 @@ ARCHIVE_WORKER_CXXFLAGS += -Wno-missing-braces -Wno-nontrivial-memcall
 ARCHIVE_WORKER_CFLAGS := -O3 -Wall -Wno-unused-parameter
 ARCHIVE_WORKER_LDFLAGS := -pthread -lSceNotification
 
-CC_CMD := "$(CC)"
-CXX_CMD := "$(CXX)"
+CC_CMD := $(PYTHON) compile_wrapper.py "$(CC)"
+CXX_CMD := $(PYTHON) compile_wrapper.py "$(CXX)"
 STRIP_CMD := "$(STRIP)"
 LD_CMD := "$(LD)"
 DEPLOY_CMD := "$(PS5_DEPLOY)"
@@ -172,8 +172,9 @@ LLVM_BINDIR_POSIX := $(shell cygpath -u "$(LLVM_BINDIR)" 2>/dev/null || printf '
 PS5_PAYLOAD_SDK_SHELL := $(subst \,/,$(PS5_PAYLOAD_SDK))
 LLVM_CONFIG_SHELL := $(subst \,/,$(LLVM_CONFIG))
 LLVM_BINDIR_SHELL := $(subst \,/,$(LLVM_BINDIR))
-RUN_ENV := cd "$(CURDIR_POSIX)" && export LLVM_CONFIG="$(LLVM_CONFIG_SHELL)" && export LLVM_BINDIR="$(LLVM_BINDIR_SHELL)"
+RUN_ENV := cd "$(CURDIR_POSIX)" && export LLVM_CONFIG="$(LLVM_CONFIG_SHELL)" && export LLVM_BINDIR="$(LLVM_BINDIR_SHELL)" && export PATH="$(LLVM_BINDIR_SHELL):$$PATH"
 STRIP_CMD := "$(LLVM_BINDIR_SHELL)/llvm-strip"
+LD_CMD := "$(PS5_PAYLOAD_SDK_SHELL)/win/prospero-lld.exe"
 WINDOWS_LINK_PREFIX := --gc-sections --sysroot="$(PS5_PAYLOAD_SDK_SHELL)"
 WINDOWS_LINK_PREFIX += -L"$(PS5_PAYLOAD_SDK_SHELL)/target/lib"
 WINDOWS_LINK_PREFIX += -L"$(PS5_PAYLOAD_SDK_SHELL)/target/user/homebrew/lib"
@@ -204,7 +205,7 @@ WINDOWS_CXX_LINK_SUFFIX := -lSceNotification -lkernel_web -lSceLibcInternal
 WINDOWS_CXX_LINK_SUFFIX += -lSceNet -lpthread -lc_stub_weak -lkernel_stub_weak
 WINDOWS_CXX_LINK_SUFFIX += -l:crtend.o -l:crtn.o
 define run
-bash -lc '$(RUN_ENV) && $(1)'
+$(RUN_ENV) && $(1)
 endef
 else
 define run

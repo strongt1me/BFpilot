@@ -272,7 +272,6 @@ search_arena_alloc(string_arena_t **arena, size_t size) {
     new_a->ptr = malloc(cap);
     if(!new_a->ptr) {
       free(new_a);
-      free(new_a);
       return NULL;
     }
     new_a->used = 0;
@@ -581,7 +580,7 @@ search_save_index(search_index_t *idx) {
 
   idx_header_t hdr = {0};
   snprintf(hdr.magic, sizeof(hdr.magic), "BFPILOT_IDX");
-  hdr.version = 1;
+  hdr.version = 2;
   hdr.count = idx->count;
   hdr.built_at = idx->built_at;
   hdr.build_ms = idx->build_ms;
@@ -628,7 +627,7 @@ search_load_index(void) {
     fclose(f);
     return NULL;
   }
-  if(strcmp(hdr.magic, "BFPILOT_IDX") != 0 || hdr.version != 1) {
+  if(strcmp(hdr.magic, "BFPILOT_IDX") != 0 || hdr.version != 2) {
     fclose(f);
     return NULL;
   }
@@ -846,10 +845,10 @@ static void *crawler_thread_func(void *arg) {
 
   for(;;) {
     pthread_mutex_lock(&q->lock);
-    while(q->head >= q->count && !q->done_pushing && !search_cancelled()) {
+    while(q->head >= q->count && (!q->done_pushing || q->active_workers > 0) && !search_cancelled()) {
       pthread_cond_wait(&q->cond, &q->lock);
     }
-    if(search_cancelled() || (q->head >= q->count && q->done_pushing)) {
+    if(search_cancelled() || (q->head >= q->count && q->done_pushing && q->active_workers == 0)) {
       pthread_mutex_unlock(&q->lock);
       break;
     }
@@ -858,13 +857,13 @@ static void *crawler_thread_func(void *arg) {
     q->active_workers++;
     pthread_mutex_unlock(&q->lock);
 
-    int fd = open(dir_path, O_RDONLY | O_DIRECTORY);
-    if(fd < 0) {
+    DIR *dir = opendir(dir_path);
+    if(!dir) {
       pthread_mutex_lock(&shared->index_lock);
       shared->saved_errno = errno;
       idx->errors++;
       pthread_mutex_unlock(&shared->index_lock);
-      search_diag_log("FAIL: open(%s) = %s", dir_path, strerror(errno));
+      search_diag_log("FAIL: opendir(%s) = %s", dir_path, strerror(errno));
       free(dir_path);
 
       pthread_mutex_lock(&q->lock);
@@ -884,124 +883,112 @@ static void *crawler_thread_func(void *arg) {
     int is_truncated = idx->truncated;
     pthread_mutex_unlock(&shared->index_lock);
 
-    char buf[65536];
+    struct dirent *ent;
     int read_errno = 0;
     for(;;) {
-      int nread = getdents(fd, buf, sizeof(buf));
-      if(nread < 0) {
+      errno = 0;
+      ent = readdir(dir);
+      if(!ent) {
         read_errno = errno;
         break;
       }
-      if(nread == 0) break;
 
-      for(int i = 0; i < nread; ) {
-        struct dirent *ent = (struct dirent *)(buf + i);
-        if(ent->d_reclen == 0) break;
-        
-        if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) {
-          i += ent->d_reclen;
-          continue;
-        }
-        if(search_cancelled()) break;
+      if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) {
+        continue;
+      }
+      if(search_cancelled()) break;
 
-        char child[1024];
-        if(strlen(dir_path) + strlen(ent->d_name) + 2 >= sizeof(child)) {
-          pthread_mutex_lock(&shared->index_lock);
-          idx->skipped++;
-          pthread_mutex_unlock(&shared->index_lock);
-          i += ent->d_reclen;
-          continue;
-        }
-        join_path(child, sizeof(child), dir_path, ent->d_name);
-
-        if(shared->system_mode && search_skip_system_path(child)) {
-          pthread_mutex_lock(&shared->index_lock);
-          idx->skipped++;
-          pthread_mutex_unlock(&shared->index_lock);
-          i += ent->d_reclen;
-          continue;
-        }
-
-        struct stat st = {0};
-        int stat_rc = 0;
-        if (ent->d_type == DT_REG) {
-          st.st_mode = S_IFREG | 0644;
-          st.st_size = 0;
-          st.st_mtime = 0;
-        } else {
-          stat_rc = lstat(child, &st);
-        }
-
-        if(stat_rc != 0) {
-          pthread_mutex_lock(&shared->index_lock);
-          idx->errors++;
-          pthread_mutex_unlock(&shared->index_lock);
-          i += ent->d_reclen;
-          continue;
-        }
-
+      char child[1024];
+      if(strlen(dir_path) + strlen(ent->d_name) + 2 >= sizeof(child)) {
         pthread_mutex_lock(&shared->index_lock);
-        int add_rc = search_index_add(idx, child, &st);
-        if(add_rc < 0) {
-          shared->rc = -1;
-          shared->saved_errno = ENOMEM;
-          snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
-          pthread_mutex_unlock(&shared->index_lock);
-          break;
-        }
+        idx->skipped++;
+        pthread_mutex_unlock(&shared->index_lock);
+        continue;
+      }
+      join_path(child, sizeof(child), dir_path, ent->d_name);
 
-        if(S_ISDIR(st.st_mode)) {
-          if(!idx->truncated) {
-            /* Use dev+ino to detect symlink loops across any device */
-            if(visited_set_add(shared->visited, st.st_dev, st.st_ino) > 0) {
-              char *copy = search_strdup(child);
-              if(!copy) {
+      if(shared->system_mode && search_skip_system_path(child)) {
+        pthread_mutex_lock(&shared->index_lock);
+        idx->skipped++;
+        pthread_mutex_unlock(&shared->index_lock);
+        continue;
+      }
+
+      struct stat st = {0};
+      int stat_rc = 0;
+      if (ent->d_type == DT_REG) {
+        st.st_mode = S_IFREG | 0644;
+        st.st_size = 0;
+        st.st_mtime = 0;
+      } else {
+        stat_rc = lstat(child, &st);
+      }
+
+      if(stat_rc != 0) {
+        pthread_mutex_lock(&shared->index_lock);
+        idx->errors++;
+        pthread_mutex_unlock(&shared->index_lock);
+        continue;
+      }
+
+      pthread_mutex_lock(&shared->index_lock);
+      int add_rc = search_index_add(idx, child, &st);
+      if(add_rc < 0) {
+        shared->rc = -1;
+        shared->saved_errno = ENOMEM;
+        snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
+        pthread_mutex_unlock(&shared->index_lock);
+        break;
+      }
+
+      if(S_ISDIR(st.st_mode)) {
+        if(!idx->truncated) {
+          /* Use dev+ino to detect symlink loops across any device */
+          if(visited_set_add(shared->visited, st.st_dev, st.st_ino) > 0) {
+            char *copy = search_strdup(child);
+            if(!copy) {
+              shared->rc = -1;
+              shared->saved_errno = ENOMEM;
+              snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
+              pthread_mutex_unlock(&shared->index_lock);
+              break;
+            }
+            pthread_mutex_lock(&q->lock);
+            if(q->count >= q->cap) {
+              size_t next = q->cap ? q->cap * 2 : 256;
+              char **items = (char **)realloc(q->dirs, next * sizeof(*items));
+              if(items) {
+                q->dirs = items;
+                q->cap = next;
+              } else {
+                free(copy);
                 shared->rc = -1;
                 shared->saved_errno = ENOMEM;
                 snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
+                pthread_mutex_unlock(&q->lock);
                 pthread_mutex_unlock(&shared->index_lock);
                 break;
               }
-              pthread_mutex_lock(&q->lock);
-              if(q->count >= q->cap) {
-                size_t next = q->cap ? q->cap * 2 : 256;
-                char **items = realloc(q->dirs, next * sizeof(*items));
-                if(items) {
-                  q->dirs = items;
-                  q->cap = next;
-                } else {
-                  free(copy);
-                  shared->rc = -1;
-                  shared->saved_errno = ENOMEM;
-                  snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
-                  pthread_mutex_unlock(&q->lock);
-                  pthread_mutex_unlock(&shared->index_lock);
-                  break;
-                }
-              }
-              q->dirs[q->count++] = copy;
-              pthread_cond_signal(&q->cond);
-              pthread_mutex_unlock(&q->lock);
-            } else {
-              search_diag_log("SKIP LOOP: %s", child);
             }
+            q->dirs[q->count++] = copy;
+            pthread_cond_signal(&q->cond);
+            pthread_mutex_unlock(&q->lock);
+          } else {
+            search_diag_log("SKIP LOOP: %s", child);
           }
         }
-
-        if((idx->count % BFPILOT_SEARCH_PROGRESS_INTERVAL) == 0) {
-          publish_progress(idx, child, NULL, 0);
-        }
-        is_truncated = idx->truncated;
-        pthread_mutex_unlock(&shared->index_lock);
-
-        if(is_truncated) break;
-        i += ent->d_reclen;
       }
-      
-      if(search_cancelled() || shared->rc != 0 || is_truncated) break;
+
+      if((idx->count % BFPILOT_SEARCH_PROGRESS_INTERVAL) == 0) {
+        publish_progress(idx, child, NULL, 0);
+      }
+      is_truncated = idx->truncated;
+      pthread_mutex_unlock(&shared->index_lock);
+
+      if(is_truncated) break;
     }
 
-    close(fd);
+    closedir(dir);
     free(dir_path);
 
     pthread_mutex_lock(&shared->index_lock);

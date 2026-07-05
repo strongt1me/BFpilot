@@ -15,8 +15,6 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
 
 #include "fs.h"
 #include "mime.h"
@@ -262,34 +260,58 @@ file_request(const http_request_t *req, const char *path) {
     return websrv_send_error_json(req->fd, 404, strerror(errno));
   }
 
+  size_t file_size = (size_t)st.st_size;
+  off_t offset = 0;
+  size_t content_size = file_size;
+
+  /* Support ?tail=N to serve only the last N bytes of the file (for log viewing) */
+  char tail_str[32];
+  if(websrv_get_query_arg(req, "tail", tail_str, sizeof(tail_str))) {
+    size_t tail_bytes = (size_t)strtoull(tail_str, NULL, 10);
+    if(tail_bytes > 0 && tail_bytes < file_size) {
+      offset = (off_t)(file_size - tail_bytes);
+      content_size = tail_bytes;
+    }
+  }
+
+  /* Seek to offset if tailing */
+  if(offset > 0 && lseek(fd, offset, SEEK_SET) < 0) {
+    close(fd);
+    return websrv_send_error_json(req->fd, 500, strerror(errno));
+  }
+
   const char *mime = mime_get_type(path);
   if(websrv_send_headers(req->fd, 200, mime ? mime : "application/octet-stream",
-                         (size_t)st.st_size, NULL) != 0) {
+                         content_size, NULL) != 0) {
+    close(fd);
+    return -1;
+  }
+
+  char *buf = malloc(STREAM_BUF_SIZE);
+  if(!buf) {
     close(fd);
     return -1;
   }
 
   int rc = 0;
-  off_t offset = 0;
-  size_t remaining = (size_t)st.st_size;
-
+  size_t remaining = content_size;
   while(remaining > 0) {
-    off_t sent = 0;
-    if(sendfile(fd, req->fd, offset, remaining, NULL, &sent, 0) < 0) {
-      if(errno == EINTR || errno == EAGAIN) {
-        if(sent > 0) {
-          offset += sent;
-          remaining -= sent;
-        }
-        continue;
-      }
+    size_t to_read = remaining < STREAM_BUF_SIZE ? remaining : STREAM_BUF_SIZE;
+    ssize_t n = read(fd, buf, to_read);
+    if(n < 0) {
+      if(errno == EINTR) continue;
       rc = -1;
       break;
     }
-    if(sent == 0) break;
-    offset += sent;
-    remaining -= sent;
+    if(n == 0) break;
+    if(websrv_write_all(req->fd, buf, (size_t)n) != 0) {
+      rc = -1;
+      break;
+    }
+    remaining -= (size_t)n;
   }
+
+  free(buf);
   close(fd);
   return rc;
 }

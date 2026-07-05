@@ -143,7 +143,7 @@ search_diag_log(const char *fmt, ...) {
     line[n++] = '\n';
     line[n] = 0;
   }
-  FILE *file = fopen("/data/gemBFPILOT/search_crawl.log", "a");
+  FILE *file = fopen("/data/BFpilot/search_crawl.log", "a");
   if(file) {
     fwrite(line, 1, (size_t)n, file);
     fclose(file);
@@ -570,7 +570,7 @@ typedef struct {
 static void
 search_save_index(search_index_t *idx) {
   if(!idx || idx->count == 0) return;
-  FILE *f = fopen("/data/gemBFPILOT/search.idx", "wb");
+  FILE *f = fopen("/data/BFpilot/search.idx", "wb");
   if(!f) return;
 
   uint64_t string_block_size = 0;
@@ -619,7 +619,7 @@ search_save_index(search_index_t *idx) {
 
 static search_index_t *
 search_load_index(void) {
-  FILE *f = fopen("/data/gemBFPILOT/search.idx", "rb");
+  FILE *f = fopen("/data/BFpilot/search.idx", "rb");
   if(!f) return NULL;
 
   idx_header_t hdr;

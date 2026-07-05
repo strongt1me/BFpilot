@@ -35,9 +35,9 @@
 #define UPLOAD_PREALLOC_MIN_SIZE (64UL * 1024UL * 1024UL)
 #define BFPILOT_SPACE_MARGIN_BYTES (256ULL * 1024ULL * 1024ULL)
 #define BFPILOT_DATA_ROOT "/data"
-#define BFPILOT_DATA_DIR "/data/gemBFPILOT"
-#define BFPILOT_SHORTCUTS_PATH "/data/gemBFPILOT/shortcuts.txt"
-#define BFPILOT_SHORTCUTS_TMP "/data/gemBFPILOT/shortcuts.tmp"
+#define BFPILOT_DATA_DIR "/data/BFpilot"
+#define BFPILOT_SHORTCUTS_PATH "/data/BFpilot/shortcuts.txt"
+#define BFPILOT_SHORTCUTS_TMP "/data/BFpilot/shortcuts.tmp"
 #define BFPILOT_MAX_SHORTCUTS 32
 
 #ifndef BFPILOT_ENABLE_INTEGRATED_ARCHIVE
@@ -45,9 +45,9 @@
 #endif
 
 #if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
-#define BFPILOT_ARCHIVE_DIR "/data/gemBFPILOT/archive-integrated"
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive-integrated"
 #else
-#define BFPILOT_ARCHIVE_DIR "/data/gemBFPILOT/archive"
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive"
 #endif
 #define BFPILOT_ARCHIVE_JOB BFPILOT_ARCHIVE_DIR "/job.ini"
 #define BFPILOT_ARCHIVE_JOB_TMP BFPILOT_ARCHIVE_DIR "/job.tmp"

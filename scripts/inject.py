@@ -1,10 +1,13 @@
 import socket
 import time
 
+import os
+
 try:
-    with open("C:/Users/Blurf/Documents/PS5 dev/projects/GemBfpilot/bfpilot.elf", "rb") as f:
+    elf_path = os.path.join(os.path.dirname(__file__), "../bfpilot.elf")
+    with open(elf_path, "rb") as f:
         payload = f.read()
-    print(f"Loaded {len(payload)} bytes")
+    print(f"Loaded {len(payload)} bytes from {elf_path}")
     s = socket.socket()
     s.connect(("192.168.1.204", 9021))
     s.sendall(payload)

@@ -45,9 +45,9 @@ extern "C" int posix_fallocate(int fd, off_t offset, off_t len);
 #endif
 
 #if BFPILOT_ARCHIVE_INTEGRATED
-#define BFPILOT_ARCHIVE_DIR "/data/gemBFPILOT/archive-integrated"
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive-integrated"
 #else
-#define BFPILOT_ARCHIVE_DIR "/data/gemBFPILOT/archive"
+#define BFPILOT_ARCHIVE_DIR "/data/BFpilot/archive"
 #endif
 #define BFPILOT_ARCHIVE_JOB BFPILOT_ARCHIVE_DIR "/job.ini"
 #define BFPILOT_ARCHIVE_STATUS BFPILOT_ARCHIVE_DIR "/status.json"

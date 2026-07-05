@@ -2023,8 +2023,13 @@ MarkInterruptedArchiveStatus(const std::string &old_status) {
   LogLine("archive interrupted status recovered old_status=%s", sample.c_str());
 }
 
+static volatile int g_archive_daemon_exit = 0;
+static volatile int g_archive_daemon_running = 0;
+
 static void *
 ArchiveDaemonMain(void *arg) {
+  g_archive_daemon_running = 1;
+  g_archive_daemon_exit = 0;
   if(!MkdirAll(BFPILOT_ARCHIVE_DIR)) {
     LogLine("archive daemon mkdir failed errno=%d", errno);
     return (void*)2;
@@ -2073,6 +2078,7 @@ ArchiveDaemonMain(void *arg) {
 
   std::string last_job;
   for(;;) {
+    if(g_archive_daemon_exit) break;
     std::string status;
     bool prepared = ReadSmallFile(BFPILOT_ARCHIVE_STATUS, status, 32768) &&
                     status.find("\"state\":\"prepared\"") != std::string::npos;
@@ -2089,6 +2095,7 @@ ArchiveDaemonMain(void *arg) {
     usleep(250000);
   }
   close(lock_fd);
+  g_archive_daemon_running = 0;
   return NULL;
 }
 
@@ -2114,6 +2121,15 @@ bfpilot_archive_start_daemon(void) {
 
   pthread_detach(thread);
   return 0;
+}
+
+extern "C" void
+bfpilot_archive_stop_daemon(void) {
+  g_archive_daemon_exit = 1;
+  for(int i = 0; i < 50; i++) {
+    if(!g_archive_daemon_running) break;
+    usleep(20000);
+  }
 }
 
 #ifndef BFPILOT_ARCHIVE_NO_MAIN

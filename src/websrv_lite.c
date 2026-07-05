@@ -12,6 +12,7 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -171,11 +172,27 @@ websrv_request_exit(void) {
   g_websrv_exit_requested = 1;
   int srvfd = g_websrv_srvfd;
   g_websrv_srvfd = -1;
+  unsigned short port = g_websrv_port;
   pthread_mutex_unlock(&g_websrv_lock);
 
   if(srvfd >= 0) {
     shutdown(srvfd, SHUT_RDWR);
     close(srvfd);
+  }
+
+  if(port > 0) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if(fd >= 0) {
+      struct sockaddr_in addr = {0};
+      addr.sin_len = sizeof(addr);
+      addr.sin_family = AF_INET;
+      addr.sin_port = htons(port);
+      addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      int flags = fcntl(fd, F_GETFL, 0);
+      if(flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+      connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+      close(fd);
+    }
   }
 }
 
@@ -717,6 +734,7 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
 
   pthread_mutex_lock(&g_websrv_lock);
   g_websrv_srvfd = srvfd;
+  g_websrv_port = port;
   pthread_mutex_unlock(&g_websrv_lock);
 
   if(ready_cb) ready_cb(port, ready_arg);

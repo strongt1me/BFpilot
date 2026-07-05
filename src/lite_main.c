@@ -27,6 +27,8 @@
 #include "transfer.h"
 #include "version.h"
 #include "websrv.h"
+#include "archive_worker.h"
+#include "search.h"
 
 #define BFPILOT_RELOAD_TOKEN "bs5fm-local-reload"
 
@@ -395,6 +397,12 @@ main(int argc, char **argv) {
     }
     sleep(rc == -EADDRINUSE || rc == -EACCES ? 5 : 2);
   }
+
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
+  bfpilot_archive_stop_daemon();
+#endif
+  bfpilot_search_shutdown();
+
   _exit(0);
   return 0;
 }

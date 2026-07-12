@@ -28,13 +28,16 @@
 #define BFPILOT_SEARCH_SYSTEM_ROOT_LABEL "system"
 #define BFPILOT_SEARCH_DEFAULT_ROOT BFPILOT_SEARCH_ALL_ROOTS_LABEL
 #define BFPILOT_SEARCH_MAX_ENTRIES 2000000UL
-#define BFPILOT_SEARCH_MAX_ROOTS 48
+#define BFPILOT_SEARCH_MAX_ROOTS 64
 #define BFPILOT_SEARCH_MAX_QUERY 256
 #define BFPILOT_SEARCH_MAX_TERMS 8
 #define BFPILOT_SEARCH_DEFAULT_LIMIT 200UL
 #define BFPILOT_SEARCH_MAX_LIMIT 1000UL
-#define BFPILOT_SEARCH_PROGRESS_INTERVAL 1024UL
+#define BFPILOT_SEARCH_PROGRESS_INTERVAL 2048UL
 #define BFPILOT_SEARCH_CRAWL_NICE 4
+/* Keep worker count moderate: P2JB/Y2JB 11.xx can KP under heavy FS thrash. */
+#define BFPILOT_SEARCH_WORKER_THREADS 4
+#define BFPILOT_SEARCH_ROOT_ERR_ABORT 32
 
 typedef struct json_buf {
   char  *data;
@@ -92,6 +95,12 @@ typedef struct search_state {
   char               error[256];
   char               stale_reason[96];
   char               last_query[128];
+  char               roots_ok[768];
+  char               roots_fail[512];
+  char               roots_skip[512];
+  int                roots_tried;
+  int                roots_succeeded;
+  int                roots_failed;
   time_t             started_at;
   time_t             ended_at;
   long               elapsed_ms;
@@ -101,6 +110,7 @@ typedef struct search_state {
   unsigned long      dirs_indexed;
   unsigned long      skipped;
   unsigned long      errors;
+  unsigned long      mount_skips;
   unsigned long      last_query_scanned;
   unsigned long      last_query_matched;
   unsigned long      last_query_returned;
@@ -359,6 +369,7 @@ search_wide_path_allowed(const char *path) {
 
 static int
 search_skip_system_path(const char *path) {
+  /* Never descend into these trees during any crawl. */
   static const char *skip[] = {
     "/dev",
     "/net",
@@ -366,6 +377,8 @@ search_skip_system_path(const char *path) {
     "/run",
     "/sys",
     "/mnt/sandbox",
+    "/mnt/shadowmnt",
+    "/system_tmp",
     NULL
   };
   for(int i = 0; skip[i]; i++) {
@@ -375,12 +388,50 @@ search_skip_system_path(const char *path) {
 }
 
 
+/* Roots we never select as crawl roots (still may exist as mount points). */
+static int
+search_reject_as_root(const char *path) {
+  static const char *reject[] = {
+    "/dev",
+    "/net",
+    "/proc",
+    "/run",
+    "/sys",
+    "/mnt",           /* tmpfs hub; use /mnt/usb* /mnt/ext* only */
+    "/mnt/sandbox",
+    "/mnt/shadowmnt",
+    "/system_tmp",    /* volatile tmpfs */
+    "/update",        /* update package mount; low value, higher risk */
+    NULL
+  };
+  if(!path || !path[0]) return 1;
+  for(int i = 0; reject[i]; i++) {
+    if(!strcmp(path, reject[i])) return 1;
+  }
+  return search_skip_system_path(path);
+}
+
+
+static void
+append_root_csv(char *buf, size_t buf_sz, const char *item) {
+  if(!buf || !buf_sz || !item || !item[0]) return;
+  size_t used = strlen(buf);
+  size_t need = strlen(item) + (used ? 1 : 0);
+  if(used + need + 1 >= buf_sz) return;
+  if(used) {
+    buf[used++] = ',';
+    buf[used] = 0;
+  }
+  snprintf(buf + used, buf_sz - used, "%s", item);
+}
+
+
 static void
 add_system_root(char roots[][1024], int *count, const char *root,
-                int have_base_dev, dev_t base_dev) {
+                int have_base_dev, dev_t base_dev, int force) {
   if(*count >= BFPILOT_SEARCH_MAX_ROOTS ||
      !search_wide_path_allowed(root) ||
-     search_skip_system_path(root)) {
+     search_reject_as_root(root)) {
     search_diag_log("ROOT SKIP (rule/full): %s", root);
     return;
   }
@@ -389,14 +440,18 @@ add_system_root(char roots[][1024], int *count, const char *root,
     search_diag_log("ROOT SKIP (missing/not dir): %s", root);
     return;
   }
-  if(strcmp(root, "/") && have_base_dev && st.st_dev == base_dev) {
+  /* Same device as / is already covered by the / crawl with XDEV fencing,
+   * unless force=1 for high-value nullfs-style views that must be explicit. */
+  if(!force && strcmp(root, "/") && have_base_dev && st.st_dev == base_dev) {
     search_diag_log("ROOT SKIP (matches base_dev): %s", root);
     return;
   }
   for(int i = 0; i < *count; i++) {
     if(!strcmp(roots[i], root)) return;
   }
-  search_diag_log("ROOT ADD: %s", root);
+  search_diag_log("ROOT ADD: %s (dev=%llu ino=%llu)", root,
+                  (unsigned long long)st.st_dev,
+                  (unsigned long long)st.st_ino);
   snprintf(roots[*count], 1024, "%s", root);
   (*count)++;
 }
@@ -409,23 +464,53 @@ collect_system_roots(char roots[][1024]) {
   int have_base_dev = lstat("/", &root_st) == 0 && S_ISDIR(root_st.st_mode);
   dev_t base_dev = have_base_dev ? root_st.st_dev : 0;
 
-  add_system_root(roots, &count, "/", 0, 0);
+  /* High-value user storage first so a later root failure still yields a useful
+   * partial index if we ever stop early. */
+  static const char *priority[] = {
+    "/data",
+    "/data/homebrew",
+    "/data/downloads",
+    "/user",
+    "/user/app",
+    "/user/appmeta",
+    "/user/download",
+    "/user/addcont",
+    "/user/patch",
+    "/user/savedata",
+    "/user/home",
+    "/user/av_contents",
+    NULL
+  };
+  for(int i = 0; priority[i]; i++) {
+    /* force=1: keep explicit useful views even when dev ids collide oddly. */
+    add_system_root(roots, &count, priority[i], have_base_dev, base_dev, 1);
+  }
 
-  static const char *candidates[] = {
+  for(int i = 0; i < 8; i++) {
+    char root[32];
+    snprintf(root, sizeof(root), "/mnt/usb%d", i);
+    add_system_root(roots, &count, root, 0, 0, 1);
+    snprintf(root, sizeof(root), "/mnt/ext%d", i);
+    add_system_root(roots, &count, root, 0, 0, 1);
+  }
+
+  static const char *system_candidates[] = {
     "/system",
     "/system_data",
     "/system_ex",
     "/preinst",
     "/preinst2",
     "/hostapp",
-    "/data",
-    "/user",
     NULL
   };
-  for(int i = 0; candidates[i]; i++) {
-    add_system_root(roots, &count, candidates[i], have_base_dev, base_dev);
+  for(int i = 0; system_candidates[i]; i++) {
+    add_system_root(roots, &count, system_candidates[i], have_base_dev, base_dev, 0);
   }
 
+  /* Root filesystem last: tiny on many firmwares; XDEV-fenced. */
+  add_system_root(roots, &count, "/", 0, 0, 1);
+
+  /* Dynamic discovery of other top-level mounts (firmware-specific). */
   DIR *dir = opendir("/");
   if(dir) {
     struct dirent *ent;
@@ -434,19 +519,12 @@ collect_system_roots(char roots[][1024]) {
       char child[1024];
       if(strlen(ent->d_name) + 2 >= sizeof(child)) continue;
       snprintf(child, sizeof(child), "/%s", ent->d_name);
-      add_system_root(roots, &count, child, have_base_dev, base_dev);
+      add_system_root(roots, &count, child, have_base_dev, base_dev, 0);
     }
     closedir(dir);
   }
 
-  for(int i = 0; i < 8; i++) {
-    char root[32];
-    snprintf(root, sizeof(root), "/mnt/usb%d", i);
-    add_system_root(roots, &count, root, 0, 0);
-    snprintf(root, sizeof(root), "/mnt/ext%d", i);
-    add_system_root(roots, &count, root, 0, 0);
-  }
-
+  search_diag_log("ROOT COLLECT done count=%d", count);
   return count;
 }
 
@@ -756,14 +834,19 @@ finish_build(search_index_t *idx, int rc, const char *error, int saved_errno,
   g_search.truncated = idx ? idx->truncated : g_search.truncated;
   g_search.current[0] = 0;
 
-  if(rc == 0 && idx) {
+  /* Publish any non-empty index even when some roots failed (rc==0 path). */
+  if(rc == 0 && idx && idx->count > 0) {
     idx->built_at = g_search.ended_at;
     idx->build_ms = g_search.elapsed_ms;
     old = g_search.index;
     g_search.index = idx;
     g_search.stale = g_search.stale_generation != start_generation;
     if(!g_search.stale) g_search.stale_reason[0] = 0;
-    snprintf(g_search.error, sizeof(g_search.error), "%s", "");
+    if(error && error[0]) {
+      snprintf(g_search.error, sizeof(g_search.error), "%s", error);
+    } else {
+      g_search.error[0] = 0;
+    }
     search_save_index(idx);
   } else {
     if(error && error[0]) snprintf(g_search.error, sizeof(g_search.error), "%s", error);
@@ -790,6 +873,7 @@ finish_build(search_index_t *idx, int rc, const char *error, int saved_errno,
 typedef struct {
   dev_t dev;
   ino_t ino;
+  unsigned char used; /* required: PS5 can report st_dev==0 (e.g. /user views) */
 } visited_dir_t;
 
 typedef struct {
@@ -798,32 +882,39 @@ typedef struct {
   size_t cap;
 } visited_set_t;
 
+static size_t
+visited_hash(dev_t dev, ino_t ino, size_t cap) {
+  uint64_t mixed = ((uint64_t)dev * 0x9E3779B97F4A7C15ULL) ^
+                   ((uint64_t)ino * 0xBF58476D1CE4E5B9ULL);
+  return (size_t)(mixed & (cap - 1));
+}
+
 static int
 visited_set_add(visited_set_t *set, dev_t dev, ino_t ino) {
-  if (set->count * 2 >= set->cap) {
+  if(set->cap == 0 || set->count * 2 >= set->cap) {
     size_t new_cap = set->cap ? set->cap * 2 : 16384;
     visited_dir_t *new_entries = calloc(new_cap, sizeof(visited_dir_t));
-    if (!new_entries) return -1;
-    for (size_t i = 0; i < set->cap; i++) {
-      if (set->entries[i].dev || set->entries[i].ino) {
-        size_t idx = (set->entries[i].dev ^ set->entries[i].ino) & (new_cap - 1);
-        while (new_entries[idx].dev || new_entries[idx].ino) {
-          idx = (idx + 1) & (new_cap - 1);
-        }
-        new_entries[idx] = set->entries[i];
+    if(!new_entries) return -1;
+    for(size_t i = 0; i < set->cap; i++) {
+      if(!set->entries[i].used) continue;
+      size_t idx = visited_hash(set->entries[i].dev, set->entries[i].ino, new_cap);
+      while(new_entries[idx].used) {
+        idx = (idx + 1) & (new_cap - 1);
       }
+      new_entries[idx] = set->entries[i];
     }
     free(set->entries);
     set->entries = new_entries;
     set->cap = new_cap;
   }
-  size_t idx = (dev ^ ino) & (set->cap - 1);
-  while (set->entries[idx].dev || set->entries[idx].ino) {
-    if (set->entries[idx].dev == dev && set->entries[idx].ino == ino) return 0;
+  size_t idx = visited_hash(dev, ino, set->cap);
+  while(set->entries[idx].used) {
+    if(set->entries[idx].dev == dev && set->entries[idx].ino == ino) return 0;
     idx = (idx + 1) & (set->cap - 1);
   }
   set->entries[idx].dev = dev;
   set->entries[idx].ino = ino;
+  set->entries[idx].used = 1;
   set->count++;
   return 1;
 }
@@ -854,9 +945,12 @@ typedef struct {
   crawl_queue_t queue;
   dev_t root_dev;
   int system_mode;
+  int same_device; /* FreeBSD FTS_XDEV style: do not cross mounts */
   int rc;
   int saved_errno;
   char error[256];
+  unsigned long mount_skips;
+  unsigned long root_errors;
   pthread_mutex_t index_lock;
 } crawl_shared_t;
 
@@ -929,27 +1023,50 @@ static void *crawler_thread_func(void *arg) {
       }
       join_path(child, sizeof(child), dir_path, ent->d_name);
 
-      if(shared->system_mode && search_skip_system_path(child)) {
+      if(search_skip_system_path(child)) {
         pthread_mutex_lock(&shared->index_lock);
         idx->skipped++;
         pthread_mutex_unlock(&shared->index_lock);
         continue;
       }
 
+      /* Always lstat: d_type is non-portable and skipping it zeroed sizes,
+       * which made search results far less useful than Everything-style UIs. */
       struct stat st = {0};
-      int stat_rc = 0;
-      if (ent->d_type == DT_REG) {
-        st.st_mode = S_IFREG | 0644;
-        st.st_size = 0;
-        st.st_mtime = 0;
-      } else {
-        stat_rc = lstat(child, &st);
+      if(lstat(child, &st) != 0) {
+        int e = errno;
+        /* Soft-fail: bad entries should not kill the whole root. */
+        if(e == EIO || e == ESTALE || e == EFAULT || e == EBADF) {
+          pthread_mutex_lock(&shared->index_lock);
+          shared->root_errors++;
+          idx->errors++;
+          pthread_mutex_unlock(&shared->index_lock);
+          search_diag_log("STAT FATAL-ish (errno=%d) on: %s", e, child);
+          if(shared->root_errors >= BFPILOT_SEARCH_ROOT_ERR_ABORT) {
+            pthread_mutex_lock(&q->lock);
+            shared->rc = -1;
+            shared->saved_errno = e;
+            snprintf(shared->error, sizeof(shared->error),
+                     "too many fatal FS errors under root");
+            pthread_cond_broadcast(&q->cond);
+            pthread_mutex_unlock(&q->lock);
+            break;
+          }
+        } else {
+          pthread_mutex_lock(&shared->index_lock);
+          idx->errors++;
+          pthread_mutex_unlock(&shared->index_lock);
+        }
+        continue;
       }
 
-      if(stat_rc != 0) {
-        search_diag_log("STAT ERROR (errno=%d) on: %s", errno, child);
+      /* Record mountpoint names but do not cross devices (XDEV). */
+      if(shared->same_device && S_ISDIR(st.st_mode) && st.st_dev != shared->root_dev) {
         pthread_mutex_lock(&shared->index_lock);
-        idx->errors++;
+        shared->mount_skips++;
+        idx->skipped++;
+        /* Still index the mount directory entry itself for discoverability. */
+        (void)search_index_add(idx, child, &st);
         pthread_mutex_unlock(&shared->index_lock);
         continue;
       }
@@ -967,9 +1084,10 @@ static void *crawler_thread_func(void *arg) {
         break;
       }
 
-      if(S_ISDIR(st.st_mode)) {
+      if(S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
         if(!idx->truncated) {
-          if(visited_set_add(shared->visited, st.st_dev, st.st_ino) > 0) {
+          int vis = visited_set_add(shared->visited, st.st_dev, st.st_ino);
+          if(vis > 0) {
             char *copy = search_strdup(child);
             if(!copy) {
               pthread_mutex_lock(&q->lock);
@@ -990,7 +1108,6 @@ static void *crawler_thread_func(void *arg) {
                 q->cap = next;
               } else {
                 free(copy);
-                pthread_mutex_lock(&q->lock);
                 shared->rc = -1;
                 shared->saved_errno = ENOMEM;
                 snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
@@ -1003,8 +1120,18 @@ static void *crawler_thread_func(void *arg) {
             q->dirs[q->count++] = copy;
             pthread_cond_signal(&q->cond);
             pthread_mutex_unlock(&q->lock);
+          } else if(vis == 0) {
+            /* already visited */
           } else {
-            search_diag_log("SKIP LOOP: %s", child);
+            pthread_mutex_lock(&q->lock);
+            shared->rc = -1;
+            shared->saved_errno = ENOMEM;
+            snprintf(shared->error, sizeof(shared->error),
+                     "%s", "visited-set out of memory");
+            pthread_cond_broadcast(&q->cond);
+            pthread_mutex_unlock(&q->lock);
+            pthread_mutex_unlock(&shared->index_lock);
+            break;
           }
         }
       }
@@ -1057,6 +1184,18 @@ crawl_one_root(search_index_t *idx, const char *root, char *error,
     return -1;
   }
 
+  /* If another root already covered this mount (same dev+ino), skip. */
+  int vis = visited_set_add(visited, root_st.st_dev, root_st.st_ino);
+  if(vis == 0) {
+    search_diag_log("ROOT SKIP (already covered): %s", root);
+    return 0;
+  }
+  if(vis < 0) {
+    *saved_errno = ENOMEM;
+    snprintf(error, error_sz, "%s", "visited-set out of memory");
+    return -1;
+  }
+
   int root_add_rc = search_index_add(idx, root, &root_st);
   if(root_add_rc < 0) {
     *saved_errno = ENOMEM;
@@ -1065,13 +1204,12 @@ crawl_one_root(search_index_t *idx, const char *root, char *error,
   }
   if(idx->truncated) return 0;
 
-  visited_set_add(visited, root_st.st_dev, root_st.st_ino);
-
   crawl_shared_t shared = {0};
   shared.idx = idx;
   shared.visited = visited;
   shared.root_dev = root_st.st_dev;
   shared.system_mode = system_mode;
+  shared.same_device = 1; /* always XDEV: separate mounts are separate roots */
   pthread_mutex_init(&shared.index_lock, NULL);
   pthread_mutex_init(&shared.queue.lock, NULL);
   pthread_cond_init(&shared.queue.cond, NULL);
@@ -1093,9 +1231,9 @@ crawl_one_root(search_index_t *idx, const char *root, char *error,
   shared.queue.cap = 256;
   shared.queue.dirs[shared.queue.count++] = root_copy;
 
-  pthread_t threads[8];
+  pthread_t threads[BFPILOT_SEARCH_WORKER_THREADS];
   int thread_count = 0;
-  for(int i=0; i<8; i++) {
+  for(int i = 0; i < BFPILOT_SEARCH_WORKER_THREADS; i++) {
     if(pthread_create(&threads[i], NULL, crawler_thread_func, &shared) == 0) {
       thread_count++;
     }
@@ -1184,28 +1322,87 @@ search_worker(void *arg) {
   int rc = 0;
   int saved_errno = 0;
   char error[256] = {0};
+  char roots_ok[768] = {0};
+  char roots_fail[512] = {0};
+  int roots_succeeded = 0;
+  int roots_failed = 0;
+  int fatal = 0;
 
+  /* One global visited set across roots so nullfs aliases do not double-count. */
   visited_set_t visited = {0};
 
-  for(int i = 0; i < root_count && !search_cancelled() && !idx->truncated; i++) {
+  for(int i = 0; i < root_count && !search_cancelled() && !idx->truncated && !fatal; i++) {
     publish_progress(idx, roots[i], NULL, 0);
-    /* Reset visited set per-root so separate mount trees don't interfere */
-    visited_set_free(&visited);
-    visited = (visited_set_t){0};
-    rc = crawl_one_root(idx, roots[i], error, sizeof(error), &saved_errno,
-                        system || global, &visited);
-    if(rc != 0) break;
+    search_diag_log("ROOT CRAWL start: %s", roots[i]);
+    int root_rc = crawl_one_root(idx, roots[i], error, sizeof(error), &saved_errno,
+                                 system || global, &visited);
+    if(root_rc == 0) {
+      roots_succeeded++;
+      append_root_csv(roots_ok, sizeof(roots_ok), roots[i]);
+      search_diag_log("ROOT CRAWL ok: %s entries=%zu", roots[i], idx->count);
+    } else if(saved_errno == ENOMEM) {
+      /* Hard stop: do not thrash after OOM. */
+      fatal = 1;
+      rc = -1;
+      roots_failed++;
+      append_root_csv(roots_fail, sizeof(roots_fail), roots[i]);
+      search_diag_log("ROOT CRAWL oom: %s", roots[i]);
+    } else {
+      /* Soft-fail: keep indexing remaining roots. */
+      roots_failed++;
+      append_root_csv(roots_fail, sizeof(roots_fail), roots[i]);
+      search_diag_log("ROOT CRAWL fail: %s errno=%d err=%s", roots[i],
+                      saved_errno, error);
+      error[0] = 0;
+      saved_errno = 0;
+    }
+
+    pthread_mutex_lock(&g_search.lock);
+    g_search.roots_tried = i + 1;
+    g_search.roots_succeeded = roots_succeeded;
+    g_search.roots_failed = roots_failed;
+    snprintf(g_search.roots_ok, sizeof(g_search.roots_ok), "%s", roots_ok);
+    snprintf(g_search.roots_fail, sizeof(g_search.roots_fail), "%s", roots_fail);
+    pthread_mutex_unlock(&g_search.lock);
   }
-  
+
   visited_set_free(&visited);
 
-  if(search_cancelled() && rc == 0) {
+  if(search_cancelled()) {
+    if(idx->count > 0) {
+      /* Keep partial index on cancel — still useful. */
+      rc = 0;
+      snprintf(error, sizeof(error), "%s", "cancelled (partial index kept)");
+    } else {
+      rc = -1;
+      saved_errno = ECANCELED;
+      snprintf(error, sizeof(error), "%s", "cancelled");
+    }
+  } else if(!fatal && idx->count > 0) {
+    /* Partial success is success for Index All. */
+    rc = 0;
+    if(roots_failed > 0 && !error[0]) {
+      snprintf(error, sizeof(error),
+               "indexed with %d root failure(s)", roots_failed);
+    }
+  } else if(!fatal && idx->count == 0) {
     rc = -1;
-    saved_errno = ECANCELED;
-    snprintf(error, sizeof(error), "%s", "cancelled");
+    if(!error[0]) snprintf(error, sizeof(error), "%s", "no entries indexed");
+    if(!saved_errno) saved_errno = ENOENT;
   }
 
-  publish_progress(idx, NULL, rc == 0 ? NULL : error, saved_errno);
+  pthread_mutex_lock(&g_search.lock);
+  g_search.roots_tried = root_count;
+  g_search.roots_succeeded = roots_succeeded;
+  g_search.roots_failed = roots_failed;
+  snprintf(g_search.roots_ok, sizeof(g_search.roots_ok), "%s", roots_ok);
+  snprintf(g_search.roots_fail, sizeof(g_search.roots_fail), "%s", roots_fail);
+  pthread_mutex_unlock(&g_search.lock);
+
+  search_diag_log("ROOT CRAWL summary ok=%d fail=%d entries=%zu",
+                  roots_succeeded, roots_failed, idx->count);
+
+  publish_progress(idx, NULL, error[0] ? error : NULL, saved_errno);
   finish_build(idx, rc, error, saved_errno, start_generation);
   return NULL;
 }
@@ -1223,6 +1420,8 @@ append_status_json(json_buf_t *b) {
   unsigned long skipped, errors, last_query_scanned, last_query_matched;
   unsigned long last_query_returned;
   unsigned long long memory_estimate;
+  char roots_ok[768], roots_fail[512];
+  int roots_tried, roots_succeeded, roots_failed;
 
   pthread_mutex_lock(&g_search.lock);
   idx = g_search.index;
@@ -1237,6 +1436,11 @@ append_status_json(json_buf_t *b) {
   snprintf(error, sizeof(error), "%s", g_search.error);
   snprintf(stale_reason, sizeof(stale_reason), "%s", g_search.stale_reason);
   snprintf(last_query, sizeof(last_query), "%s", g_search.last_query);
+  snprintf(roots_ok, sizeof(roots_ok), "%s", g_search.roots_ok);
+  snprintf(roots_fail, sizeof(roots_fail), "%s", g_search.roots_fail);
+  roots_tried = g_search.roots_tried;
+  roots_succeeded = g_search.roots_succeeded;
+  roots_failed = g_search.roots_failed;
   started_at = g_search.started_at;
   ended_at = g_search.ended_at;
   elapsed_ms = g_search.elapsed_ms;
@@ -1301,9 +1505,16 @@ append_status_json(json_buf_t *b) {
      json_string(b, last_query) != 0 ||
      json_appendf(b,
                   ",\"lastQueryScanned\":%lu,\"lastQueryMatched\":%lu,"
-                  "\"lastQueryReturned\":%lu,\"lastQueryMs\":%ld}",
+                  "\"lastQueryReturned\":%lu,\"lastQueryMs\":%ld,"
+                  "\"rootsTried\":%d,\"rootsSucceeded\":%d,\"rootsFailed\":%d,"
+                  "\"rootsOk\":",
                   last_query_scanned, last_query_matched,
-                  last_query_returned, last_query_ms) != 0) {
+                  last_query_returned, last_query_ms,
+                  roots_tried, roots_succeeded, roots_failed) != 0 ||
+     json_string(b, roots_ok) != 0 ||
+     json_append(b, ",\"rootsFail\":") != 0 ||
+     json_string(b, roots_fail) != 0 ||
+     json_append(b, "}") != 0) {
     return -1;
   }
   return 0;
@@ -1374,7 +1585,14 @@ rebuild_request(const http_request_t *req) {
   g_search.dirs_indexed = 0;
   g_search.skipped = 0;
   g_search.errors = 0;
+  g_search.mount_skips = 0;
   g_search.memory_estimate = 0;
+  g_search.roots_tried = 0;
+  g_search.roots_succeeded = 0;
+  g_search.roots_failed = 0;
+  g_search.roots_ok[0] = 0;
+  g_search.roots_fail[0] = 0;
+  g_search.roots_skip[0] = 0;
   g_search.current[0] = 0;
   g_search.error[0] = 0;
   snprintf(g_search.root, sizeof(g_search.root), "%s", root);
@@ -1617,17 +1835,26 @@ bfpilot_search_shutdown(void) {
 
 int
 bfpilot_search_request(const http_request_t *req, const char *url) {
+  /* Load disk cache without holding the search lock (avoid blocking HTTP). */
+  int need_load = 0;
   pthread_mutex_lock(&g_search.lock);
-  if(!g_search.index && !g_search.running) {
+  if(!g_search.index && !g_search.running) need_load = 1;
+  pthread_mutex_unlock(&g_search.lock);
+  if(need_load) {
     search_index_t *idx = search_load_index();
     if(idx) {
-      g_search.index = idx;
-      g_search.stale = 0;
-      g_search.stale_reason[0] = 0;
-      g_search.stale_generation++;
+      pthread_mutex_lock(&g_search.lock);
+      if(!g_search.index) {
+        g_search.index = idx;
+        g_search.stale = 0;
+        g_search.stale_reason[0] = 0;
+        g_search.stale_generation++;
+        idx = NULL;
+      }
+      pthread_mutex_unlock(&g_search.lock);
+      if(idx) search_index_free(idx);
     }
   }
-  pthread_mutex_unlock(&g_search.lock);
 
   if(!strcmp(url, "/api/fs/search/status")) return status_request(req);
   if(!strcmp(url, "/api/fs/search/rebuild")) return rebuild_request(req);

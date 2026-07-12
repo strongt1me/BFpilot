@@ -1766,17 +1766,26 @@
       const system = root === 'system';
       if (!status || !status.indexed) {
         if (status && status.running) {
-          const parts = [system ? 'Indexing system' : 'Indexing all storage'];
+          const parts = [system ? 'Indexing system' : 'Indexing detected mounts'];
           parts.push(Number(status.entries || 0).toLocaleString() + ' seen');
+          if (status.rootsSucceeded || status.rootsTried) {
+            parts.push('roots ' + Number(status.rootsSucceeded || 0) + '/' +
+              Number(status.rootsTried || 0));
+          }
           if (status.current) parts.push(status.current);
           return parts.join(' | ');
         }
-        return 'Index not built';
+        return 'Index not built — press Index All';
       }
       const parts = [Number(status.entries || 0).toLocaleString() +
         (status.running ? ' seen' : ' indexed')];
-      parts.push(system ? 'system' : 'storage');
+      parts.push(system ? 'system' : 'multi-root');
       if (status.running) parts.push('indexing');
+      if (status.rootsSucceeded || status.rootsTried) {
+        parts.push('roots ' + Number(status.rootsSucceeded || 0) + '/' +
+          Number(status.rootsTried || status.rootsSucceeded || 0));
+      }
+      if (status.rootsFailed > 0) parts.push(status.rootsFailed + ' root fails');
       if (status.stale) parts.push('stale');
       if (status.truncated) parts.push('truncated');
       if (status.elapsedMs > 0) parts.push((Number(status.elapsedMs) / 1000).toFixed(1) + 's');

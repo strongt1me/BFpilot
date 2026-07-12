@@ -32,19 +32,18 @@ The project builds these payloads:
 - Clicking the row body does single-select; clicking the checkbox toggles without deselecting others
 
 ### Search & Indexing
-- **Index All** rebuilds an in-memory path index using a multi-threaded work-stealing crawler
-- It does **not** guarantee a full crawl of every path on the console. The rebuild (default root label `all`) collects **detected** search roots, then crawls each one:
-  - always starts from `/`
-  - adds known separate mounts when they exist as directories, including candidates such as `/system`, `/system_data`, `/system_ex`, `/preinst`, `/preinst2`, `/hostapp`, `/data`, `/user`
-  - also picks up other top-level directories under `/` that are on a **different** device id than `/`
-  - adds present `/mnt/usb0`–`/mnt/usb7` and `/mnt/ext0`–`/mnt/ext7` mounts
-  - **skips** pseudo/volatile trees such as `/dev`, `/proc`, `/sys`, `/net`, `/run`, and `/mnt/sandbox`
-  - **skips** missing paths and paths that fail `lstat`
-  - hard cap of about **2,000,000** indexed entries (rebuild can report `truncated`)
-- Search queries scan the in-memory index with case-insensitive matching (`strcasestr`); latency is usually low once the index exists, but it is not a fixed `0ms` guarantee
-- Results can highlight matched terms in the filename and path
-- Live index status (running / done / counts); indexing can be cancelled
-- Search is only useful after a successful rebuild; an empty index returns an error until Index All has finished
+- **Index All** rebuilds an in-memory path index (Everything-style: crawl once, query RAM) using a multi-threaded work-stealing crawler
+- It does **not** walk every kernel mount. Default `all` mode collects **priority + detected** roots, then crawls each with **same-device (XDEV)** fencing:
+  - **first:** `/data` (and useful subtrees like `/data/homebrew`), `/user` (app/meta/download/savedata/…), `/mnt/usb0–7`, `/mnt/ext0–7`
+  - **then:** `/system`, `/system_data`, `/system_ex`, `/preinst*`, `/hostapp`, other distinct top-level mounts, and `/`
+  - **never as full roots:** `/mnt` hub, `/system_tmp`, `/update`, `/mnt/sandbox`, `/mnt/shadowmnt`, `/dev`, `/proc`, `/sys`, `/net`, `/run`
+  - mountpoint directory names may appear in the index, but crawlers **do not cross `st_dev`**
+  - **soft-fail:** one bad root does not throw away the rest; status reports `rootsOk` / `rootsFail`
+  - hard cap ~**2,000,000** entries (`truncated` if hit)
+- Queries use case-insensitive multi-term `strcasestr` over the in-memory index (usually very fast after rebuild; not a fixed `0ms` guarantee)
+- Results highlight matches; sizes/mtimes come from real `lstat` data
+- Live status includes entry counts, timing, and root success/failure lists; cancel is supported
+- Optional disk cache: `/data/BFpilot/search.idx`
 
 ### Archive Extraction
 - **ZIP** — Stored, Deflate, ZIP64, ZipCrypto password, multi-volume `.zip.001` / `.z01` splits

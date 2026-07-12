@@ -536,7 +536,35 @@ diag_request(const http_request_t *req) {
 
 
 static int
+diag_log_udp_request(const http_request_t *req) {
+  char ip[64] = {0};
+  char port_str[16] = {0};
+  (void)websrv_get_query_arg(req, "ip", ip, sizeof(ip));
+  (void)websrv_get_query_arg(req, "port", port_str, sizeof(port_str));
+
+  unsigned short port = 5906;
+  if(port_str[0]) {
+    port = (unsigned short)strtol(port_str, NULL, 10);
+  }
+
+  bfpilot_diag_set_log_udp_target(ip, port);
+
+  char body[256];
+  int n = snprintf(body, sizeof(body), "{\"ok\":true,\"ip\":\"%s\",\"port\":%u}", ip, port);
+  if(n < 0) return -1;
+  if((size_t)n >= sizeof(body)) n = (int)sizeof(body) - 1;
+  return websrv_send(req->fd, 200, "application/json", body, (size_t)n);
+}
+
+
+static int
 shutdown_request(const http_request_t *req) {
+  char token[64];
+  if(!websrv_get_query_arg(req, "token", token, sizeof(token)) ||
+     strcmp(token, CONTROL_TOKEN) != 0) {
+    return websrv_send_error_json(req->fd, 403, "forbidden");
+  }
+
   const char body[] = "{\"ok\":true,\"shutdown\":true}";
   int rc = websrv_send(req->fd, 200, "application/json",
                        body, sizeof(body) - 1);
@@ -559,7 +587,10 @@ dispatch_request(const http_request_t *req, const char *initial_body,
     if(!strcmp(req->path, "/api/diag")) {
       return diag_request(req);
     }
-    if(!strcmp(req->path, "/api/control/shutdown") || !strncmp(req->path, "/api/control/shutdown?", 22)) {
+    if(!strcmp(req->path, "/api/diag/log_udp")) {
+      return diag_log_udp_request(req);
+    }
+    if(!strcmp(req->path, "/api/control/shutdown")) {
       return shutdown_request(req);
     }
     if(!strcmp(req->path, "/fs") || !strncmp(req->path, "/fs/", 4)) {
@@ -572,7 +603,7 @@ dispatch_request(const http_request_t *req, const char *initial_body,
   }
 
   if(!strcmp(req->method, "POST")) {
-    if(!strcmp(req->path, "/api/control/shutdown")) {
+    if(!strcmp(req->path, "/api/control/shutdown") || !strncmp(req->path, "/api/control/shutdown?", 22)) {
       return shutdown_request(req);
     }
     if(!strcmp(req->path, "/api/fs/upload")) {
@@ -740,7 +771,9 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
   if(ready_cb) ready_cb(port, ready_arg);
 
   while(!g_websrv_exit_requested) {
-    int connfd = accept(srvfd, NULL, NULL);
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    int connfd = accept(srvfd, (struct sockaddr *)&client_addr, &client_len);
     if(connfd < 0) {
       if(g_websrv_exit_requested) {
         return -ECANCELED;
@@ -760,6 +793,10 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
 
       if(active) close(srvfd);
       return -err;
+    }
+
+    if(client_addr.sin_family == AF_INET && client_addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+      bfpilot_diag_set_log_udp_target(inet_ntoa(client_addr.sin_addr), 5906);
     }
 
     int bufsize = 2 * 1024 * 1024;

@@ -125,6 +125,8 @@ static std::atomic<unsigned long long> g_rar_mt_large_blocks;
 static struct rusage g_usage_start;
 static int g_usage_started = 0;
 
+extern "C" int g_archive_cancel = 0;
+
 static long
 NowMs(void) {
   struct timespec ts;
@@ -1146,9 +1148,191 @@ struct ZipEntry {
   unsigned long long compressed_size;
   unsigned long long uncompressed_size;
   unsigned long long local_offset;
+  unsigned int disk_number;
   bool is_dir;
   bool encrypted;
   bool aes_encrypted;
+};
+
+struct ZipVolumeInfo {
+  std::string path;
+  unsigned long long size;
+  unsigned long long start_offset;
+};
+
+class ZipMultiVolume {
+public:
+  std::vector<ZipVolumeInfo> volumes;
+  unsigned long long total_size;
+  bool is_split;
+  unsigned long long stream_pos;
+
+  ZipMultiVolume() : total_size(0), is_split(false), stream_pos(0) {}
+  ~ZipMultiVolume() {
+    Close();
+  }
+
+  void Close() {
+    for(size_t i = 0; i < fds.size(); i++) {
+      if(fds[i] >= 0) close(fds[i]);
+    }
+    fds.clear();
+    volumes.clear();
+    total_size = 0;
+    is_split = false;
+    stream_pos = 0;
+  }
+
+  bool Open(const std::string &path, std::string &error) {
+    Close();
+
+    std::string lower_path = path;
+    for(size_t i = 0; i < lower_path.size(); i++) {
+      lower_path[i] = (char)tolower((unsigned char)lower_path[i]);
+    }
+
+    std::string dir = DirName(path);
+    std::string base = BaseName(path);
+
+    std::vector<std::string> candidate_paths;
+
+    if(lower_path.size() > 4 && lower_path.substr(lower_path.size() - 4) == ".zip") {
+      std::string prefix = JoinPath(dir, base.substr(0, base.size() - 4));
+      struct stat st;
+      if(stat((prefix + ".z01").c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+        is_split = true;
+        for(int part = 1; part <= 9999; part++) {
+          char ext[32];
+          snprintf(ext, sizeof(ext), ".z%02d", part);
+          std::string p = prefix + ext;
+          if(stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+            snprintf(ext, sizeof(ext), ".Z%02d", part);
+            p = prefix + ext;
+            if(stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+              break;
+            }
+          }
+          candidate_paths.push_back(p);
+        }
+        candidate_paths.push_back(path);
+      }
+    } else if(lower_path.size() > 4 && lower_path.substr(lower_path.size() - 4) == ".001") {
+      std::string prefix = JoinPath(dir, base.substr(0, base.size() - 4));
+      struct stat st;
+      if(stat((prefix + ".001").c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+        is_split = true;
+        for(int part = 1; part <= 9999; part++) {
+          char ext[32];
+          snprintf(ext, sizeof(ext), ".%03d", part);
+          std::string p = prefix + ext;
+          if(stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            candidate_paths.push_back(p);
+          } else {
+            break;
+          }
+        }
+      }
+    }
+
+    if(candidate_paths.empty()) {
+      struct stat st;
+      if(stat(path.c_str(), &st) != 0) {
+        error = "failed to stat zip archive: " + path;
+        return false;
+      }
+      ZipVolumeInfo vol;
+      vol.path = path;
+      vol.size = (unsigned long long)st.st_size;
+      vol.start_offset = 0;
+      volumes.push_back(vol);
+      total_size = vol.size;
+    } else {
+      for(size_t i = 0; i < candidate_paths.size(); i++) {
+        struct stat st;
+        if(stat(candidate_paths[i].c_str(), &st) != 0) {
+          error = "failed to stat volume: " + candidate_paths[i];
+          return false;
+        }
+        ZipVolumeInfo vol;
+        vol.path = candidate_paths[i];
+        vol.size = (unsigned long long)st.st_size;
+        vol.start_offset = total_size;
+        total_size += vol.size;
+        volumes.push_back(vol);
+      }
+    }
+
+    for(size_t i = 0; i < volumes.size(); i++) {
+      int fd = open(volumes[i].path.c_str(), O_RDONLY);
+      if(fd < 0) {
+        error = "failed to open volume: " + volumes[i].path;
+        Close();
+        return false;
+      }
+      fds.push_back(fd);
+    }
+
+    stream_pos = 0;
+    return true;
+  }
+
+  bool Seek(unsigned long long pos) {
+    if(pos > total_size) return false;
+    stream_pos = pos;
+    return true;
+  }
+
+  bool Read(void *data, size_t size) {
+    if(!ReadExactAt(stream_pos, data, size)) return false;
+    stream_pos += size;
+    return true;
+  }
+
+  bool ReadExactAt(unsigned long long offset, void *data, size_t size) {
+    if(size == 0) return true;
+    if(offset + size > total_size) return false;
+
+    unsigned char *ptr = (unsigned char *)data;
+    size_t remaining = size;
+    unsigned long long cur = offset;
+
+    while(remaining > 0) {
+      int vol_idx = -1;
+      for(size_t i = 0; i < volumes.size(); i++) {
+        if(cur >= volumes[i].start_offset && cur < volumes[i].start_offset + volumes[i].size) {
+          vol_idx = (int)i;
+          break;
+        }
+      }
+      if(vol_idx < 0) return false;
+
+      unsigned long long local = cur - volumes[vol_idx].start_offset;
+      unsigned long long vol_rem = volumes[vol_idx].size - local;
+      size_t chunk = remaining < vol_rem ? remaining : (size_t)vol_rem;
+
+      int fd = fds[(size_t)vol_idx];
+      if(lseek(fd, (off_t)local, SEEK_SET) < 0) return false;
+
+      size_t done = 0;
+      while(done < chunk) {
+        ssize_t n = read(fd, ptr + done, chunk - done);
+        if(n < 0) {
+          if(errno == EINTR) continue;
+          return false;
+        }
+        if(n == 0) return false;
+        done += (size_t)n;
+      }
+
+      ptr += chunk;
+      remaining -= chunk;
+      cur += chunk;
+    }
+    return true;
+  }
+
+private:
+  std::vector<int> fds;
 };
 
 struct ZipIoBuffers {
@@ -1166,6 +1350,22 @@ struct ZipIoBuffers {
     return true;
   }
 };
+
+static bool
+ReadExactAt(ZipMultiVolume &mv, unsigned long long offset, void *data, size_t size) {
+  return mv.ReadExactAt(offset, data, size);
+}
+
+static bool
+TimedReadExact(ZipMultiVolume &mv, void *data, size_t size) {
+  unsigned long long start = NowUsec();
+  bool ok = mv.Read(data, size);
+  if(ok) {
+    unsigned long long end = NowUsec();
+    Ps5ArchiveInputSample((unsigned long long)size, end > start ? end - start : 0);
+  }
+  return ok;
+}
 
 static bool
 ParseZip64Extra(const std::vector<unsigned char> &extra, ZipEntry &entry,
@@ -1214,7 +1414,7 @@ ZipExtraHasAes(const std::vector<unsigned char> &extra) {
 }
 
 static bool
-FindZipCentralDir(int fd, unsigned long long file_size,
+FindZipCentralDir(ZipMultiVolume &mv, unsigned long long file_size,
                   unsigned long long &central_offset,
                   unsigned long long &central_size,
                   unsigned long long &entry_count,
@@ -1222,7 +1422,7 @@ FindZipCentralDir(int fd, unsigned long long file_size,
   size_t tail_size =
       (size_t)std::min<unsigned long long>(file_size, 22ULL + 65535ULL + 128ULL);
   std::vector<unsigned char> tail(tail_size);
-  if(!ReadExactAt(fd, file_size - tail_size, tail.data(), tail_size)) {
+  if(!ReadExactAt(mv, file_size - tail_size, tail.data(), tail_size)) {
     error = "failed to read zip end of central directory";
     return false;
   }
@@ -1244,8 +1444,14 @@ FindZipCentralDir(int fd, unsigned long long file_size,
   unsigned int size32 = ReadLe32(p + 12);
   unsigned int offset32 = ReadLe32(p + 16);
   central_size = size32;
-  central_offset = offset32;
   entry_count = entries16;
+
+  unsigned int disk_with_cd = ReadLe16(p + 6);
+  if(mv.is_split && disk_with_cd < mv.volumes.size()) {
+    central_offset = mv.volumes[disk_with_cd].start_offset + offset32;
+  } else {
+    central_offset = offset32;
+  }
 
   bool needs_zip64 = entries16 == 0xffffU || size32 == 0xffffffffU ||
                      offset32 == 0xffffffffU;
@@ -1257,26 +1463,38 @@ FindZipCentralDir(int fd, unsigned long long file_size,
     return false;
   }
   unsigned char locator[20];
-  if(!ReadExactAt(fd, eocd_abs - 20, locator, sizeof(locator)) ||
+  if(!ReadExactAt(mv, eocd_abs - 20, locator, sizeof(locator)) ||
      ReadLe32(locator) != ZIP_SIG_ZIP64_LOCATOR) {
     error = "zip64 locator missing";
     return false;
   }
-  unsigned long long zip64_eocd_offset = ReadLe64(locator + 8);
+  unsigned long long zip64_eocd_offset_raw = ReadLe64(locator + 8);
+  unsigned int disk_with_zip64_eocd = ReadLe32(locator + 4);
+  unsigned long long zip64_eocd_offset = zip64_eocd_offset_raw;
+  if(mv.is_split && disk_with_zip64_eocd < mv.volumes.size()) {
+    zip64_eocd_offset = mv.volumes[disk_with_zip64_eocd].start_offset + zip64_eocd_offset_raw;
+  }
+
   unsigned char zip64[56];
-  if(!ReadExactAt(fd, zip64_eocd_offset, zip64, sizeof(zip64)) ||
+  if(!ReadExactAt(mv, zip64_eocd_offset, zip64, sizeof(zip64)) ||
      ReadLe32(zip64) != ZIP_SIG_ZIP64_END) {
     error = "zip64 end of central directory missing";
     return false;
   }
   entry_count = ReadLe64(zip64 + 32);
   central_size = ReadLe64(zip64 + 40);
-  central_offset = ReadLe64(zip64 + 48);
+  unsigned long long zip64_offset_raw = ReadLe64(zip64 + 48);
+  unsigned int zip64_disk_with_cd = ReadLe32(zip64 + 20);
+  if(mv.is_split && zip64_disk_with_cd < mv.volumes.size()) {
+    central_offset = mv.volumes[zip64_disk_with_cd].start_offset + zip64_offset_raw;
+  } else {
+    central_offset = zip64_offset_raw;
+  }
   return true;
 }
 
 static bool
-ReadZipEntries(int fd, unsigned long long central_offset,
+ReadZipEntries(ZipMultiVolume &mv, unsigned long long central_offset,
                unsigned long long central_size,
                unsigned long long entry_count, std::vector<ZipEntry> &entries,
                std::string &error) {
@@ -1294,7 +1512,7 @@ ReadZipEntries(int fd, unsigned long long central_offset,
       return false;
     }
     unsigned char hdr[46];
-    if(!ReadExactAt(fd, offset, hdr, sizeof(hdr)) ||
+    if(!ReadExactAt(mv, offset, hdr, sizeof(hdr)) ||
        ReadLe32(hdr) != ZIP_SIG_CENTRAL) {
       error = "bad zip central directory entry";
       return false;
@@ -1309,6 +1527,7 @@ ReadZipEntries(int fd, unsigned long long central_offset,
     unsigned short name_len = ReadLe16(hdr + 28);
     unsigned short extra_len = ReadLe16(hdr + 30);
     unsigned short comment_len = ReadLe16(hdr + 32);
+    entry.disk_number = ReadLe16(hdr + 34);
     entry.local_offset = ReadLe32(hdr + 42);
     entry.encrypted = (entry.flags & 1) != 0;
 
@@ -1328,12 +1547,12 @@ ReadZipEntries(int fd, unsigned long long central_offset,
     std::vector<unsigned char> name_buf(name_len);
     std::vector<unsigned char> extra(extra_len);
     if(name_len > 0 &&
-       !ReadExactAt(fd, offset + 46, name_buf.data(), name_len)) {
+       !ReadExactAt(mv, offset + 46, name_buf.data(), name_len)) {
       error = "failed to read zip file name";
       return false;
     }
     if(extra_len > 0 &&
-       !ReadExactAt(fd, offset + 46 + name_len, extra.data(), extra_len)) {
+       !ReadExactAt(mv, offset + 46 + name_len, extra.data(), extra_len)) {
       error = "failed to read zip extra data";
       return false;
     }
@@ -1364,18 +1583,36 @@ ReadZipEntries(int fd, unsigned long long central_offset,
 }
 
 static bool
-OpenZipEntryData(int fd, const ZipEntry &entry, unsigned long long &data_offset,
+OpenZipEntryData(ZipMultiVolume &mv, const ZipEntry &entry, unsigned long long &data_offset,
                  unsigned long long archive_size, std::string &error) {
   unsigned char hdr[30];
-  if(!ReadExactAt(fd, entry.local_offset, hdr, sizeof(hdr)) ||
-     ReadLe32(hdr) != ZIP_SIG_LOCAL) {
-    error = "bad zip local file header";
+  unsigned long long local_offset = entry.local_offset;
+  bool sig_ok = false;
+
+  if(mv.is_split && entry.disk_number < mv.volumes.size()) {
+    unsigned long long test_offset = mv.volumes[entry.disk_number].start_offset + entry.local_offset;
+    if(ReadExactAt(mv, test_offset, hdr, sizeof(hdr)) && ReadLe32(hdr) == ZIP_SIG_LOCAL) {
+      local_offset = test_offset;
+      sig_ok = true;
+    }
+  }
+
+  if(!sig_ok) {
+    if(ReadExactAt(mv, entry.local_offset, hdr, sizeof(hdr)) && ReadLe32(hdr) == ZIP_SIG_LOCAL) {
+      local_offset = entry.local_offset;
+      sig_ok = true;
+    }
+  }
+
+  if(!sig_ok) {
+    error = "bad zip local file header signature";
     return false;
   }
+
   unsigned short name_len = ReadLe16(hdr + 26);
   unsigned short extra_len = ReadLe16(hdr + 28);
   unsigned long long header_len = 30ULL + name_len + extra_len;
-  if(U64AddOverflow(entry.local_offset, header_len, data_offset) ||
+  if(U64AddOverflow(local_offset, header_len, data_offset) ||
      data_offset > archive_size) {
     error = "zip local file header is outside archive";
     return false;
@@ -1384,7 +1621,7 @@ OpenZipEntryData(int fd, const ZipEntry &entry, unsigned long long &data_offset,
 }
 
 static bool
-WriteZipStoredFile(int zip_fd, int out_fd, ZipEntry &entry,
+WriteZipStoredFile(ZipMultiVolume &mv, int out_fd, ZipEntry &entry,
                    unsigned long long data_offset, ZipCrypto *crypto,
                    ZipIoBuffers &buffers, std::string &error) {
   std::vector<unsigned char> &buf = buffers.in;
@@ -1392,14 +1629,19 @@ WriteZipStoredFile(int zip_fd, int out_fd, ZipEntry &entry,
   mz_ulong crc = MZ_CRC32_INIT;
   unsigned long long written = 0;
 
-  if(lseek(zip_fd, (off_t)data_offset, SEEK_SET) < 0) {
+  if(!mv.Seek(data_offset)) {
     error = "failed to seek stored zip data";
     return false;
   }
   while(remaining > 0) {
+    extern int g_archive_cancel;
+    if(g_archive_cancel) {
+      error = "archive: cancelled";
+      return false;
+    }
     size_t want =
         (size_t)std::min<unsigned long long>(remaining, buf.size());
-    if(!TimedReadExact(zip_fd, buf.data(), want)) {
+    if(!TimedReadExact(mv, buf.data(), want)) {
       error = "failed to read stored zip data";
       return false;
     }
@@ -1431,7 +1673,7 @@ WriteZipStoredFile(int zip_fd, int out_fd, ZipEntry &entry,
 }
 
 static bool
-WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
+WriteZipDeflatedFile(ZipMultiVolume &mv, int out_fd, ZipEntry &entry,
                      unsigned long long data_offset, ZipCrypto *crypto,
                      ZipIoBuffers &buffers, std::string &error) {
   std::vector<unsigned char> &inbuf = buffers.in;
@@ -1448,7 +1690,7 @@ WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
     return false;
   }
 
-  if(lseek(zip_fd, (off_t)data_offset, SEEK_SET) < 0) {
+  if(!mv.Seek(data_offset)) {
     mz_inflateEnd(&stream);
     error = "failed to seek deflated zip data";
     return false;
@@ -1457,10 +1699,16 @@ WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
   bool ok = true;
   bool done = false;
   while(!done) {
+    extern int g_archive_cancel;
+    if(g_archive_cancel) {
+      error = "archive: cancelled";
+      ok = false;
+      break;
+    }
     if(stream.avail_in == 0 && remaining > 0) {
       size_t want =
           (size_t)std::min<unsigned long long>(remaining, inbuf.size());
-      if(!TimedReadExact(zip_fd, inbuf.data(), want)) {
+      if(!TimedReadExact(mv, inbuf.data(), want)) {
         error = "failed to read deflated zip data";
         ok = false;
         break;
@@ -1530,7 +1778,7 @@ WriteZipDeflatedFile(int zip_fd, int out_fd, ZipEntry &entry,
 }
 
 static bool
-ExtractOneZipEntry(int zip_fd, ZipEntry &entry, const std::string &dest,
+ExtractOneZipEntry(ZipMultiVolume &mv, ZipEntry &entry, const std::string &dest,
                    const std::string &password, ZipIoBuffers &buffers,
                    unsigned long long archive_size, std::string &error) {
   std::string out_path = JoinPath(dest, entry.name);
@@ -1563,7 +1811,7 @@ ExtractOneZipEntry(int zip_fd, ZipEntry &entry, const std::string &dest,
   }
 
   unsigned long long data_offset = 0;
-  if(!OpenZipEntryData(zip_fd, entry, data_offset, archive_size, error)) {
+  if(!OpenZipEntryData(mv, entry, data_offset, archive_size, error)) {
     return false;
   }
   if(entry.compressed_size > archive_size ||
@@ -1580,7 +1828,7 @@ ExtractOneZipEntry(int zip_fd, ZipEntry &entry, const std::string &dest,
       return false;
     }
     unsigned char header[12];
-    if(!ReadExactAt(zip_fd, data_offset, header, sizeof(header))) {
+    if(!ReadExactAt(mv, data_offset, header, sizeof(header))) {
       error = "failed to read encrypted zip header";
       return false;
     }
@@ -1619,10 +1867,10 @@ ExtractOneZipEntry(int zip_fd, ZipEntry &entry, const std::string &dest,
 
   bool ok = false;
   if(entry.method == 0) {
-    ok = WriteZipStoredFile(zip_fd, out_fd, entry, data_offset, crypto,
+    ok = WriteZipStoredFile(mv, out_fd, entry, data_offset, crypto,
                             buffers, error);
   } else {
-    ok = WriteZipDeflatedFile(zip_fd, out_fd, entry, data_offset, crypto,
+    ok = WriteZipDeflatedFile(mv, out_fd, entry, data_offset, crypto,
                               buffers, error);
   }
 
@@ -1638,45 +1886,33 @@ ExtractOneZipEntry(int zip_fd, ZipEntry &entry, const std::string &dest,
 static bool
 RunZipExtract(const std::string &archive_path, const std::string &dest_path,
               const std::string &password, std::string &error) {
-  int fd = open(archive_path.c_str(), O_RDONLY);
-  if(fd < 0) {
-    error = "failed to open zip archive";
-    return false;
-  }
-
-  struct stat st;
-  if(fstat(fd, &st) != 0) {
-    close(fd);
-    error = "failed to stat zip archive";
+  ZipMultiVolume mv;
+  if(!mv.Open(archive_path, error)) {
     return false;
   }
 
   unsigned long long central_offset = 0;
   unsigned long long central_size = 0;
   unsigned long long entry_count = 0;
-  if(!FindZipCentralDir(fd, (unsigned long long)st.st_size, central_offset,
+  if(!FindZipCentralDir(mv, mv.total_size, central_offset,
                         central_size, entry_count, error)) {
-    close(fd);
     return false;
   }
   unsigned long long central_end = 0;
   if(U64AddOverflow(central_offset, central_size, central_end) ||
-     central_end > (unsigned long long)st.st_size) {
-    close(fd);
+     central_end > mv.total_size) {
     error = "zip central directory is outside archive";
     return false;
   }
   if(entry_count > BFPILOT_ZIP_MAX_ENTRIES) {
-    close(fd);
     error = "zip has too many entries";
     return false;
   }
 
   std::vector<ZipEntry> entries;
   entries.reserve((size_t)std::min<unsigned long long>(entry_count, 4096ULL));
-  if(!ReadZipEntries(fd, central_offset, central_size, entry_count, entries,
+  if(!ReadZipEntries(mv, central_offset, central_size, entry_count, entries,
                      error)) {
-    close(fd);
     return false;
   }
 
@@ -1688,7 +1924,6 @@ RunZipExtract(const std::string &archive_path, const std::string &dest_path,
       unsigned long long next_total = 0;
       if(U64AddOverflow(g_status.total_bytes, entries[i].uncompressed_size,
                         next_total)) {
-        close(fd);
         error = "zip uncompressed size is too large";
         return false;
       }
@@ -1696,32 +1931,32 @@ RunZipExtract(const std::string &archive_path, const std::string &dest_path,
     }
   }
   if(!CheckDestinationSpace(dest_path, g_status.total_bytes, "zip", error)) {
-    close(fd);
     return false;
   }
   WriteStatus(true);
 
   if(!MkdirAll(dest_path)) {
-    close(fd);
     error = "failed to create zip destination";
     return false;
   }
 
   ZipIoBuffers buffers;
   if(!buffers.Init(error)) {
-    close(fd);
     return false;
   }
 
   for(size_t i = 0; i < entries.size(); i++) {
-    if(!ExtractOneZipEntry(fd, entries[i], dest_path, password, buffers,
-                           (unsigned long long)st.st_size, error)) {
-      close(fd);
+    extern int g_archive_cancel;
+    if(g_archive_cancel) {
+      error = "archive: cancelled";
+      return false;
+    }
+    if(!ExtractOneZipEntry(mv, entries[i], dest_path, password, buffers,
+                           mv.total_size, error)) {
       return false;
     }
   }
 
-  close(fd);
   return true;
 }
 
@@ -1816,8 +2051,8 @@ RunArchive(const ArchiveConfig &cfg, ArchiveType type, std::string &error) {
   return 1;
 }
 
-extern "C" int
-bfpilot_archive_run_prepared_job(void) {
+static int
+bfpilot_archive_run_prepared_job_impl(void) {
   g_status.state = "starting";
   g_status.started_ms = NowMs();
   g_status.percent = 0;
@@ -1982,6 +2217,16 @@ bfpilot_archive_run_prepared_job(void) {
   return 0;
 }
 
+
+extern "C" __attribute__((weak)) std::atomic<int> g_archive_busy(0);
+
+extern "C" int
+bfpilot_archive_run_prepared_job(void) {
+  int rc = bfpilot_archive_run_prepared_job_impl();
+  g_archive_busy.store(0);
+  return rc;
+}
+
 static bool
 StatusLooksInterrupted(const std::string &status) {
   return status.find("\"state\":\"starting\"") != std::string::npos ||
@@ -2108,16 +2353,7 @@ bfpilot_archive_start_daemon(void) {
     return -errno;
   }
 
-  // Pin archive extraction to PS5 background core (Core 6)
-  cpuset_t mask;
-  CPU_ZERO(&mask);
-  CPU_SET(6, &mask);
-  int aff_rc = pthread_setaffinity_np(thread, sizeof(cpuset_t), &mask);
-  if (aff_rc != 0) {
-    LogLine("archive daemon setaffinity failed rc=%d", aff_rc);
-  } else {
-    LogLine("archive daemon thread started and pinned to core 6");
-  }
+  LogLine("archive daemon thread started successfully");
 
   pthread_detach(thread);
   return 0;

@@ -319,6 +319,9 @@ bool File::Rename(const std::wstring &NewName)
 
 bool File::Write(const void *Data,size_t Size)
 {
+  extern int g_archive_cancel;
+  if (g_archive_cancel)
+    return false;
   if (Size==0)
     return true;
   if (HandleType==FILE_HANDLESTD)

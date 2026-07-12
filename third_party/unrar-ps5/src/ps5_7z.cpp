@@ -705,6 +705,11 @@ Z7_COM7F_IMF(CExtractCallback::SetTotal(UInt64 TotalValue))
 
 Z7_COM7F_IMF(CExtractCallback::SetCompleted(const UInt64 *CompleteValue))
 {
+  extern int g_archive_cancel;
+  if (g_archive_cancel)
+  {
+    return E_ABORT;
+  }
   if (CompleteValue && Total>0)
   {
     UInt64 Percent=(*CompleteValue)*100/Total;
@@ -1109,8 +1114,17 @@ SevenZExtractResult Run7zExtract(const std::string &ArchivePath,
     }
     else if (ExtractResult==E_ABORT)
     {
-      Result.code=RARX_BADPWD;
-      Result.reason="bad 7z password or extraction aborted";
+      extern int g_archive_cancel;
+      if (g_archive_cancel)
+      {
+        Result.code=RARX_FATAL;
+        Result.reason="archive: cancelled";
+      }
+      else
+      {
+        Result.code=RARX_BADPWD;
+        Result.reason="bad 7z password or extraction aborted";
+      }
     }
     else
     {

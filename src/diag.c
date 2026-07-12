@@ -15,6 +15,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define BFPILOT_DATA_ROOT "/data"
 #define BFPILOT_DATA_DIR "/data/BFpilot"
@@ -37,6 +40,8 @@ static int             g_first_http_seen = 0;
 static char            g_checkpoint[128] = "not-started";
 static char            g_launcher_status[64] = "unknown";
 static volatile sig_atomic_t g_handling_signal = 0;
+static int             g_log_udp_fd = -1;
+static struct sockaddr_in g_log_udp_addr;
 
 
 static int
@@ -166,6 +171,17 @@ bfpilot_log(const char *fmt, ...) {
 
   fputs(line, stdout);
   fflush(stdout);
+
+  if(g_log_udp_fd >= 0) {
+    sendto(g_log_udp_fd, line, (size_t)line_n, 0,
+           (struct sockaddr *)&g_log_udp_addr, sizeof(g_log_udp_addr));
+  }
+
+  int klog_fd = open("/dev/klog", O_WRONLY);
+  if(klog_fd >= 0) {
+    write(klog_fd, line, (size_t)line_n);
+    close(klog_fd);
+  }
 
   FILE *file = fopen(BFPILOT_LOG_PATH, "a");
   if(file) {
@@ -444,4 +460,29 @@ bfpilot_diag_can_write_data_bfpilot(void) {
 int
 bfpilot_diag_can_write_user_app(void) {
   return -1;
+}
+
+
+void
+bfpilot_diag_set_log_udp_target(const char *ip, unsigned short port) {
+  pthread_mutex_lock(&g_diag_lock);
+  if(g_log_udp_fd >= 0) {
+    close(g_log_udp_fd);
+    g_log_udp_fd = -1;
+  }
+  if(ip && ip[0] && port > 0) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if(fd >= 0) {
+      memset(&g_log_udp_addr, 0, sizeof(g_log_udp_addr));
+      g_log_udp_addr.sin_family = AF_INET;
+      g_log_udp_addr.sin_port = htons(port);
+      g_log_udp_addr.sin_addr.s_addr = inet_addr(ip);
+      if(g_log_udp_addr.sin_addr.s_addr != INADDR_NONE) {
+        g_log_udp_fd = fd;
+      } else {
+        close(fd);
+      }
+    }
+  }
+  pthread_mutex_unlock(&g_diag_lock);
 }

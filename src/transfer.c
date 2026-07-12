@@ -53,6 +53,16 @@
 #define BFPILOT_ARCHIVE_JOB_TMP BFPILOT_ARCHIVE_DIR "/job.tmp"
 #define BFPILOT_ARCHIVE_STATUS BFPILOT_ARCHIVE_DIR "/status.json"
 #define BFPILOT_ARCHIVE_STATUS_TMP BFPILOT_ARCHIVE_DIR "/status.tmp"
+
+static void
+apply_fchmod_0777(int fd) {
+  (void)fchmod(fd, 0777);
+}
+
+static void
+apply_chmod_0777(const char *path) {
+  (void)chmod(path, 0777);
+}
 #define BFPILOT_ARCHIVE_MAX_THREADS 8U
 #define BFPILOT_ARCHIVE_DEFAULT_NICE 4
 #define BFPILOT_ARCHIVE_MIN_NICE -20
@@ -189,6 +199,7 @@ mkdirs(const char *path) {
       char saved = buf[i];
       buf[i] = 0;
       if(mkdir(buf, 0777) != 0 && errno != EEXIST) return -1;
+      apply_chmod_0777(buf);
       buf[i] = saved;
     }
   }
@@ -323,7 +334,8 @@ static struct upload_state g_upload = {
   .lock = PTHREAD_MUTEX_INITIALIZER,
 };
 
-static atomic_int g_archive_busy = 0;
+atomic_int g_archive_busy = 0;
+extern int g_archive_cancel;
 
 
 int
@@ -468,6 +480,7 @@ copy_file(const char *src, const char *dst) {
     close(in);
     return -1;
   }
+  apply_fchmod_0777(out);
 
   void *buf = malloc(COPY_BUF_SIZE);
   if(!buf) {
@@ -539,6 +552,7 @@ copy_recursive(const char *src, const char *dst) {
 
   if(S_ISDIR(st.st_mode)) {
     if(mkdir(dst, 0777) != 0 && errno != EEXIST) return -1;
+    apply_chmod_0777(dst);
     DIR *d = opendir(src);
     if(!d) return -1;
     int rc = 0;
@@ -657,6 +671,7 @@ struct copy_arg {
   char src[1024];
   char dst[1024];
   int  is_move;
+  int  overwrite;
 };
 
 
@@ -728,9 +743,14 @@ copy_worker(void *arg) {
   join_path(final_dst, sizeof(final_dst), a->dst, base);
 
   if(lstat(final_dst, &final_st) == 0) {
-    job_end(-1, "destination already exists");
-    free(a);
-    return NULL;
+    if(!a->overwrite) {
+      job_end(-1, "destination already exists");
+      free(a);
+      return NULL;
+    }
+    if(!S_ISDIR(final_st.st_mode)) {
+      (void)unlink(final_dst);
+    }
   }
   if(errno != ENOENT) {
     char err[160];
@@ -1414,6 +1434,22 @@ spawn_copy_or_move(const http_request_t *req, int is_move) {
     return serve_error(req, 400, "bad src/dst");
   }
   if(!strcmp(src, dst)) return serve_error(req, 400, "src == dst");
+
+  int overwrite = 0;
+  char overwrite_str[16];
+  if(websrv_get_query_arg(req, "overwrite", overwrite_str, sizeof(overwrite_str))) {
+    overwrite = atoi(overwrite_str);
+  }
+
+  const char *base = path_basename(src);
+  char final_dst[1024];
+  join_path(final_dst, sizeof(final_dst), dst, base);
+
+  struct stat final_st;
+  if(!overwrite && lstat(final_dst, &final_st) == 0) {
+    return serve_error(req, 409, "destination already exists");
+  }
+
   if(!job_begin(is_move ? "move" : "copy")) {
     return serve_error(req, 409, "another file-manager job is already running");
   }
@@ -1428,6 +1464,7 @@ spawn_copy_or_move(const http_request_t *req, int is_move) {
   snprintf(a->src, sizeof(a->src), "%s", src);
   snprintf(a->dst, sizeof(a->dst), "%s", dst);
   a->is_move = is_move;
+  a->overwrite = overwrite;
 
   pthread_t t;
   pthread_attr_t at;
@@ -1742,6 +1779,7 @@ write_text_atomic(const char *tmp_path, const char *final_path,
                   const char *data, size_t size, mode_t mode) {
   int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
   if(fd < 0) return -1;
+  apply_fchmod_0777(fd);
   int rc = write_all_fd(fd, data, size);
   if(close(fd) != 0 && rc == 0) rc = -1;
   if(rc != 0) {
@@ -1943,9 +1981,10 @@ transfer_archive_prepare_request(const http_request_t *req,
   int expected = 0;
   if(!atomic_compare_exchange_strong(&g_archive_busy, &expected, 1)) {
     int fd = open(BFPILOT_ARCHIVE_STATUS, O_RDONLY);
+    char status[2048] = {0};
+    ssize_t n = -1;
     if(fd >= 0) {
-      char status[2048];
-      ssize_t n = read(fd, status, sizeof(status) - 1);
+      n = read(fd, status, sizeof(status) - 1);
       close(fd);
       if(n > 0) {
         status[n] = 0;
@@ -1960,10 +1999,13 @@ transfer_archive_prepare_request(const http_request_t *req,
         }
       }
     }
+    bfpilot_log("[diag] archive prepare 409 conflict: g_archive_busy=%d expected=%d n=%zd status='%s'",
+            atomic_load(&g_archive_busy), expected, n, status);
     drain_body(req->fd, initial_size, content_size);
     return serve_error(req, 409, "archive extraction is already running");
   }
 archive_busy_claimed:
+  g_archive_cancel = 0;
 #endif
 
   if(read_request_body(req, initial_data, initial_size, content_size,
@@ -2146,6 +2188,7 @@ archive_busy_claimed:
 
 static int
 cancel_handler(const http_request_t *req) {
+  g_archive_cancel = 1;
   if(atomic_load(&g_job.busy)) {
     atomic_store(&g_job.cancel, 1);
   }
@@ -2332,6 +2375,7 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
     drain_body(req->fd, initial_size, content_size);
     return serve_error(req, 500, strerror(errno));
   }
+  apply_fchmod_0777(out);
 
   int prealloc_attempted = 0;
   int prealloc_rc = 0;

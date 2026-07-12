@@ -334,9 +334,24 @@
     .file-head,
     .file-row {
       display: grid;
-      grid-template-columns: 42px minmax(0, 1fr) 92px 112px;
+      grid-template-columns: 28px 42px minmax(0, 1fr) 92px 112px;
       gap: 8px;
       align-items: center;
+    }
+
+    .chk-col {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+    }
+
+    .chk-col input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+      cursor: pointer;
+      accent-color: var(--mint);
     }
 
     .file-head {
@@ -676,7 +691,6 @@
       }
 
       .searchbar #search-rebuild,
-      .searchbar #search-system,
       .searchbar #search-cancel,
       .searchbar #search-status {
         grid-column: 1 / -1;
@@ -688,7 +702,7 @@
 
       .file-head,
       .file-row {
-        grid-template-columns: 40px minmax(0, 1fr) 78px;
+        grid-template-columns: 28px 40px minmax(0, 1fr) 78px;
       }
 
       .file-head span:last-child,
@@ -712,6 +726,19 @@
       .job-text {
         grid-column: 1 / -1;
       }
+    }
+    #image-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.9);
+      z-index: 9999;
+      padding: 20px;
+      box-sizing: border-box;
+      flex-direction: column;
     }
   </style>
 </head>
@@ -755,7 +782,6 @@
         <input id="search-query" class="path" spellcheck="false" placeholder="Search indexed paths">
         <button id="search-go" class="primary">Search</button>
         <button id="search-rebuild">Index All</button>
-        <button id="search-system" class="warn">Index System</button>
         <button id="search-cancel">Cancel</button>
         <button id="search-clear">Clear</button>
         <span id="search-status" class="search-status">Index not built</span>
@@ -765,6 +791,7 @@
         <button id="new-folder">New Folder</button>
         <button id="rename">Rename</button>
         <button id="download">Download</button>
+        <button id="edit-file" class="primary">Edit</button>
         <button id="extract" class="primary">Extract</button>
         <button id="upload-files" class="warn">Upload Files</button>
         <button id="upload-folder" class="warn">Upload Folder</button>
@@ -774,6 +801,7 @@
 
       <div class="list" id="list">
         <div class="file-head">
+          <span class="chk-col"><input type="checkbox" disabled></span>
           <span>Kind</span>
           <span>Name</span>
           <span>Type</span>
@@ -812,16 +840,49 @@
   <input id="folder-picker" class="hidden" type="file" multiple webkitdirectory directory>
   <div id="toast" class="toast"></div>
 
-  <div id="log-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 9999; padding: 20px; box-sizing: border-box; flex-direction: column;">
-    <div style="display: flex; justify-content: space-between; align-items: center; background: #222; padding: 10px; border-radius: 8px 8px 0 0;">
-      <h3 style="margin: 0; color: #fff;">System Logs</h3>
-      <div>
-        <button id="log-tab-vsh" class="button primary">PS5 System</button>
-        <button id="log-tab-payload" class="button">Payload</button>
-        <button id="log-close" class="button danger">Close</button>
+  <div id="log-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; padding: 20px; box-sizing: border-box; flex-direction: column;">
+    <div style="display: flex; justify-content: space-between; align-items: center; background: #111821; padding: 12px; border: 1px solid #293645; border-bottom: 0; border-radius: 8px 8px 0 0;">
+      <h3 style="margin: 0; color: #fff; font-family: monospace;">Diagnostics & Logs</h3>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <select id="log-select" style="background: #090d12; color: #fff; border: 1px solid #293645; padding: 6px 12px; border-radius: 4px; outline: none; cursor: pointer; font-family: monospace;">
+          <option value="bfpilot">Bfpilot Log (/data/BFpilot/log.txt)</option>
+          <option value="error-history">PS5 Error History (/system_data/priv/error/history/)</option>
+          <option value="vsh">PS5 VSH Log (/system_data/priv/vshlog/vshlog.0.txt)</option>
+          <option value="archive">Archive Extractor Log (archive-worker.log)</option>
+          <option value="search">Search Crawler Log (search_crawl.log)</option>
+          <option value="boot">Bfpilot Boot Log (boot.log)</option>
+        </select>
+        <button id="log-close" class="button danger" style="padding: 6px 12px;">Close</button>
       </div>
     </div>
-    <div id="log-content" style="flex: 1; background: #111; color: #0f0; font-family: monospace; padding: 10px; overflow-y: auto; white-space: pre-wrap; border-radius: 0 0 8px 8px;"></div>
+    <div id="log-content" style="flex: 1; background: #090d12; color: #edf4f2; font-family: Consolas, Monaco, monospace; font-size: 13px; padding: 16px; overflow-y: auto; white-space: pre-wrap; border: 1px solid #293645; border-radius: 0 0 8px 8px; line-height: 1.5; outline: none;" readonly></div>
+  </div>
+
+  <div id="editor-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9998; padding: 20px; box-sizing: border-box; flex-direction: column;">
+    <div style="display: flex; justify-content: space-between; align-items: center; background: #111821; padding: 12px; border: 1px solid #293645; border-bottom: 0; border-radius: 8px 8px 0 0;">
+      <h3 id="editor-title" style="margin: 0; color: #fff; font-family: monospace;">Edit File</h3>
+      <div>
+        <button id="editor-save" class="button primary" style="margin-right: 8px;">Save</button>
+        <button id="editor-close" class="button danger">Close</button>
+      </div>
+    </div>
+    <textarea id="editor-textarea" style="flex: 1; background: #090d12; color: #edf4f2; font-family: Consolas, Monaco, monospace; font-size: 14px; padding: 12px; border: 1px solid #293645; border-radius: 0 0 8px 8px; resize: none; outline: none; line-height: 1.5;" spellcheck="false"></textarea>
+  </div>
+
+  <div id="image-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; padding: 20px; box-sizing: border-box; flex-direction: column;">
+    <div style="display: flex; justify-content: space-between; align-items: center; background: #111821; padding: 12px; border: 1px solid #293645; border-bottom: 0; border-radius: 8px 8px 0 0;">
+      <h3 id="image-title" style="margin: 0; color: #fff; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%;">View Image</h3>
+      <div style="display: flex; gap: 8px;">
+        <button id="image-zoom-in" class="button primary">Zoom In</button>
+        <button id="image-zoom-out" class="button primary">Zoom Out</button>
+        <button id="image-rotate" class="button primary">Rotate ↻</button>
+        <button id="image-reset" class="button primary">Reset</button>
+        <button id="image-close" class="button danger">Close</button>
+      </div>
+    </div>
+    <div id="image-stage" style="flex: 1; background: #090d12; border: 1px solid #293645; border-radius: 0 0 8px 8px; display: flex; justify-content: center; align-items: center; overflow: hidden; position: relative; cursor: grab;">
+      <img id="image-img" style="max-width: 95%; max-height: 95%; object-fit: contain; transition: transform 0.15s ease-out; transform-origin: center; user-select: none; pointer-events: none;" src="" alt="">
+    </div>
   </div>
 
   <script>
@@ -1189,6 +1250,8 @@
       let stem = String(name || 'archive');
       const lower = stem.toLowerCase();
       if (lower.endsWith('.7z.001')) return stem.slice(0, -7);
+      if (lower.endsWith('.zip.001')) return stem.slice(0, -8);
+      if (lower.endsWith('.001')) return stem.slice(0, -4);
       if (lower.endsWith('.part1.rar')) return stem.slice(0, -10);
       if (/\.part\d+\.rar$/i.test(stem)) {
         return stem.replace(/\.part\d+\.rar$/i, '');
@@ -1481,6 +1544,13 @@
       const token = ++state.detailToken;
       const entries = selectedEntries();
       el('selection').textContent = entries.length + ' selected';
+      if (el('edit-file')) {
+        const hasSelection = entries.length === 1;
+        const isEditable = hasSelection && canEdit(entries[0]);
+        const isViewable = hasSelection && canViewImage(entries[0]);
+        el('edit-file').disabled = !(isEditable || isViewable);
+        el('edit-file').textContent = isViewable ? 'View' : 'Edit';
+      }
 
       const detail = el('detail');
       if (!entries.length) {
@@ -1544,14 +1614,17 @@
     }
 
     function makeRow(entry, parent) {
+      const path = parent ? parentPath(state.path) : entryPath(entry);
+      const key = entryKey(entry);
+      const isSelected = !parent && state.selected.has(key);
+      const chkHtml = parent ? '<span class="chk-col"></span>' : `<span class="chk-col select-hit"><input type="checkbox" class="row-checkbox" ${isSelected ? 'checked' : ''} style="cursor: pointer; pointer-events: auto;"></span>`;
+
       const row = document.createElement('div');
       row.className = 'file-row ' + (entry.dir ? 'dir ' : '') +
         (parent ? 'parent' : '') + (entry.path ? ' search-result' : '');
-      row.innerHTML =
+      row.innerHTML = chkHtml +
         '<span class="tag"></span><span class="name"></span><span class="muted-cell type"></span><span class="muted-cell mtime"></span>';
 
-      const path = parent ? parentPath(state.path) : entryPath(entry);
-      const key = entryKey(entry);
       row.querySelector('.tag').textContent = entry.dir ? 'DIR' : 'FILE';
       const nameEl = row.querySelector('.name');
       nameEl.title = path;
@@ -1572,7 +1645,7 @@
           openPath(parentPath(state.path));
           return;
         }
-        if (event.ctrlKey || event.metaKey) {
+        if (event.ctrlKey || event.metaKey || event.target.closest('.chk-col')) {
           if (state.selected.has(key)) state.selected.delete(key);
           else state.selected.add(key);
         } else {
@@ -1587,6 +1660,10 @@
         const next = entryPath(entry);
         if (entry.dir) {
           openPath(next);
+        } else if (canEdit(entry)) {
+          openEditor(next);
+        } else if (canViewImage(entry)) {
+          openImageViewer(next);
         } else {
           window.open(fileUrl(next), '_blank');
         }
@@ -1601,20 +1678,37 @@
 
       const head = document.createElement('div');
       head.className = 'file-head';
-      head.innerHTML = state.search.active
-        ? '<span>Kind</span><span>Path</span><span>Type</span><span>Modified</span>'
-        : '<span>Kind</span><span>Name</span><span>Type</span><span>Modified</span>';
+      const allSelected = state.entries.length > 0 && state.entries.every(e => state.selected.has(entryKey(e)));
+      head.innerHTML = `<span class="chk-col select-all-hit"><input type="checkbox" id="select-all-checkbox" ${allSelected ? 'checked' : ''} style="cursor: pointer;"></span>` +
+        (state.search.active
+          ? '<span>Kind</span><span>Path</span><span>Type</span><span>Modified</span>'
+          : '<span>Kind</span><span>Name</span><span>Type</span><span>Modified</span>');
       list.appendChild(head);
+
+      head.querySelector('#select-all-checkbox').addEventListener('click', (event) => {
+        event.stopPropagation();
+        const currentlyAll = state.entries.length > 0 && state.entries.every(e => state.selected.has(entryKey(e)));
+        if (currentlyAll) {
+          for (const entry of state.entries) {
+            state.selected.delete(entryKey(entry));
+          }
+        } else {
+          for (const entry of state.entries) {
+            state.selected.add(entryKey(entry));
+          }
+        }
+        drawList();
+      });
 
       const scroller = document.createElement('div');
       scroller.className = 'virtual-scroller';
-      
+
       let items = [];
       if (!state.search.active && state.path !== '/') {
         items.push({ name: '..', dir: true, isParent: true });
       }
       items = items.concat(state.entries);
-      
+
       const rowHeight = 43; // 42px min-height + 1px border
       scroller.style.height = (items.length * rowHeight) + 'px';
       scroller.style.position = 'relative';
@@ -1625,11 +1719,11 @@
       function renderViewport() {
         const viewportHeight = parent.clientHeight || 600;
         const scrollTop = parent.scrollTop;
-        
+
         const renderAhead = 15;
         const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - renderAhead);
         const endIdx = Math.min(items.length, startIdx + Math.ceil(viewportHeight / rowHeight) + (renderAhead * 2));
-        
+
         scroller.textContent = '';
         const fragment = document.createDocumentFragment();
         for(let i = startIdx; i < endIdx; i++) {
@@ -1647,7 +1741,7 @@
       parent.onscroll = () => {
         requestAnimationFrame(renderViewport);
       };
-      
+
       renderViewport();
 
       updatePlaces();
@@ -1659,10 +1753,10 @@
       list.textContent = '';
       const head = document.createElement('div');
       head.className = 'file-head';
-      head.innerHTML = '<span>Kind</span><span>Name</span><span>Type</span><span>Modified</span>';
+      head.innerHTML = '<span class="chk-col"><input type="checkbox" disabled></span><span>Kind</span><span>Name</span><span>Type</span><span>Modified</span>';
       const row = document.createElement('div');
       row.className = 'file-row';
-      row.innerHTML = '<span class="tag">...</span><span class="name">Loading</span><span></span><span></span>';
+      row.innerHTML = '<span class="chk-col"></span><span class="tag">...</span><span class="name">Loading</span><span></span><span></span>';
       list.appendChild(head);
       list.appendChild(row);
     }
@@ -1716,14 +1810,13 @@
       }, 800);
     }
 
-    async function rebuildSearchIndex(system) {
+    async function rebuildSearchIndex() {
       try {
-        const url = system ? '/api/fs/search/rebuild?mode=system' : '/api/fs/search/rebuild';
-        const status = await api(url);
-        state.search.root = status.root || (system ? 'system' : 'all');
+        const status = await api('/api/fs/search/rebuild');
+        state.search.root = status.root || 'all';
         el('search-status').textContent = searchStatusText(status);
         pollSearchStatus();
-        toast(system ? 'Search indexing system paths' : 'Search indexing all storage', 'ok');
+        toast('Search indexing all storage', 'ok');
       } catch (err) {
         toast('search index: ' + err.message, 'err');
       }
@@ -1814,14 +1907,15 @@
     }
 
     async function transfer(verb) {
-      const paths = selectedPaths();
+      const entries = selectedEntries();
       const target = cleanPath(el('target-path').value);
-      if (!paths.length) {
+      if (!entries.length) {
         toast('No selection', 'err');
         return;
       }
 
-      for (const source of paths) {
+      for (const entry of entries) {
+        const source = entryPath(entry);
         try {
           await api('/api/fs/' + verb +
             '?src=' + encodeURIComponent(source) +
@@ -1830,9 +1924,34 @@
           const done = await waitJobIdle();
           if (done.error) throw new Error(done.error);
         } catch (err) {
-          if ((err.message || '').toLowerCase().includes('job')) pollJob();
-          toast(verb + ': ' + err.message, 'err');
-          break;
+          if (err.message === 'destination already exists') {
+            const filename = entry.name;
+            const isDir = entry.dir;
+            const typeStr = isDir ? 'Folder' : 'File';
+            const actionStr = isDir ? 'Merge' : 'Overwrite';
+            if (confirm(`${typeStr} conflict: "${filename}" already exists in the target directory. ${actionStr}?`)) {
+              try {
+                await api('/api/fs/' + verb +
+                  '?src=' + encodeURIComponent(source) +
+                  '&dst=' + encodeURIComponent(target) +
+                  '&overwrite=1');
+                pollJob();
+                const done = await waitJobIdle();
+                if (done.error) throw new Error(done.error);
+              } catch (retryErr) {
+                if ((retryErr.message || '').toLowerCase().includes('job')) pollJob();
+                toast(verb + ': ' + retryErr.message, 'err');
+                break;
+              }
+            } else {
+              // skip (continue to next entry)
+              continue;
+            }
+          } else {
+            if ((err.message || '').toLowerCase().includes('job')) pollJob();
+            toast(verb + ': ' + err.message, 'err');
+            break;
+          }
         }
       }
 
@@ -1908,7 +2027,8 @@
       }
 
       const source = entryPath(entries[0]);
-      const suggested = joinPath(parentPath(source), archiveStem(entries[0].name));
+      const target = cleanPath(el('target-path').value || '/data');
+      const suggested = joinPath(target, archiveStem(entries[0].name));
       const destination = cleanPath(prompt('Extract to folder', suggested) || '');
       if (!destination || destination === '/') return;
       const password = prompt('Archive password (leave blank if none)', '');
@@ -2102,24 +2222,237 @@
       }, 500);
     }
 
+    let editorOriginalContent = '';
+    let editorCurrentPath = '';
+
+    function isTextName(name) {
+      const lower = String(name || '').toLowerCase();
+      return lower.endsWith('.txt') ||
+             lower.endsWith('.ini') ||
+             lower.endsWith('.json') ||
+             lower.endsWith('.xml') ||
+             lower.endsWith('.cfg') ||
+             lower.endsWith('.log') ||
+             lower.endsWith('.sh') ||
+             lower.endsWith('.bat') ||
+             lower.endsWith('.py') ||
+             lower.endsWith('.c') ||
+             lower.endsWith('.cpp') ||
+             lower.endsWith('.h') ||
+             lower.endsWith('.html') ||
+             lower.endsWith('.css') ||
+             lower.endsWith('.js') ||
+             lower.endsWith('.yaml') ||
+             lower.endsWith('.yml') ||
+             lower.endsWith('.conf') ||
+             lower.endsWith('.sql');
+    }
+
+    function isImageName(name) {
+      if (!name) return false;
+      const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico', '.svg'];
+      const ext = '.' + name.split('.').pop().toLowerCase();
+      return imageExts.includes(ext);
+    }
+
+    function canViewImage(entry) {
+      return entry && !entry.dir && isImageName(entry.name);
+    }
+
+    let imageScale = 1;
+    let imageRotate = 0;
+    let imgX = 0;
+    let imgY = 0;
+
+    function updateImageTransform() {
+      const img = el('image-img');
+      if (img) {
+        img.style.transform = `translate(${imgX}px, ${imgY}px) scale(${imageScale}) rotate(${imageRotate}deg)`;
+      }
+    }
+
+    function openImageViewer(path) {
+      el('image-title').textContent = baseName(path);
+      el('image-img').src = fileUrl(path);
+      imageScale = 1;
+      imageRotate = 0;
+      imgX = 0;
+      imgY = 0;
+      updateImageTransform();
+      el('image-overlay').style.display = 'flex';
+    }
+
+    function closeImageViewer() {
+      el('image-overlay').style.display = 'none';
+      el('image-img').src = '';
+    }
+
+    function canEdit(entry) {
+      return entry && !entry.dir && isTextName(entry.name) && entry.size < 5 * 1024 * 1024;
+    }
+
+    function openEditor(path) {
+      editorCurrentPath = path;
+      el('editor-textarea').value = 'Loading...';
+      el('editor-textarea').disabled = true;
+      el('editor-save').disabled = true;
+      el('editor-title').textContent = 'Loading: ' + baseName(path);
+      el('editor-overlay').style.display = 'flex';
+
+      fetch(fileUrl(path))
+        .then(r => {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(text => {
+          editorOriginalContent = text;
+          el('editor-textarea').value = text;
+          el('editor-textarea').disabled = false;
+          el('editor-save').disabled = false;
+          el('editor-title').textContent = 'Editing: ' + path;
+          el('editor-textarea').focus();
+        })
+        .catch(err => {
+          toast('Failed to load file: ' + err.message, 'err');
+          el('editor-overlay').style.display = 'none';
+        });
+    }
+
+    function editSelected() {
+      const entries = selectedEntries();
+      if (entries.length !== 1) return;
+      const entry = entries[0];
+      if (canEdit(entry)) {
+        openEditor(entryPath(entry));
+      } else if (canViewImage(entry)) {
+        openImageViewer(entryPath(entry));
+      } else {
+        toast('Select one editable text file under 5MB or an image', 'err');
+      }
+    }
+
+    async function saveEditor() {
+      const content = el('editor-textarea').value;
+      const path = editorCurrentPath;
+      const parent = parentPath(path);
+      const name = baseName(path);
+      const url = '/api/fs/upload?path=' + encodeURIComponent(parent) + '&filename=' + encodeURIComponent(name);
+
+      el('editor-save').disabled = true;
+      el('editor-save').textContent = 'Saving...';
+
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          body: content
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || ('HTTP ' + response.status));
+        }
+        editorOriginalContent = content;
+        toast('Saved successfully', 'ok');
+        el('editor-overlay').style.display = 'none';
+        await refreshCurrentView();
+      } catch (err) {
+        toast('save: ' + err.message, 'err');
+      } finally {
+        el('editor-save').disabled = false;
+        el('editor-save').textContent = 'Save';
+      }
+    }
+
+    function closeEditor() {
+      const content = el('editor-textarea').value;
+      if (content !== editorOriginalContent) {
+        if (!confirm('Discard unsaved changes?')) {
+          return;
+        }
+      }
+      el('editor-overlay').style.display = 'none';
+    }
+
     async function boot() {
       renderPlaces();
       await refreshPlaces(false);
 
       // Log viewer setup
       let logTimer = null;
-      let currentLogPath = '/system_data/priv/vshlog/vshlog.0.txt';
 
-      function fetchLogs() {
-        fetch('/fs' + currentLogPath + '?tail=100000').then(r => r.text()).then(t => {
-          const lc = el('log-content');
+      async function fetchLogs() {
+        const select = el('log-select');
+        if (!select) return;
+        const value = select.value;
+        const lc = el('log-content');
+        if (!lc) return;
+
+        if (value === 'error-history') {
+          try {
+            const r = await fetch('/fs/system_data/priv/error/history?fmt=json');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const entries = await r.json();
+            
+            // Sort by mtime descending (newest first)
+            entries.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+            
+            const latest = entries.slice(0, 20);
+            if (latest.length === 0) {
+              lc.textContent = 'No PS5 error logs found.';
+              return;
+            }
+            
+            let combinedText = '';
+            for (const item of latest) {
+              const filePath = `/system_data/priv/error/history/${item.name}`;
+              try {
+                const fr = await fetch('/fs' + filePath);
+                if (!fr.ok) continue;
+                const txt = await fr.text();
+                const cleanTxt = txt.replace(/^\uFEFF/, '');
+                const obj = JSON.parse(cleanTxt);
+                
+                const timeStr = item.mtime ? new Date(item.mtime * 1000).toLocaleString() : 'Unknown Time';
+                combinedText += `=== ERROR RECORD: ${obj.shortError || 'Unknown Code'} ===\n`;
+                combinedText += `Date/Time:       ${timeStr}\n`;
+                combinedText += `Title ID:        ${obj.titleId || 'N/A'}\n`;
+                combinedText += `App ID:          ${obj.__appId ?? 'N/A'}\n`;
+                combinedText += `Internal Code:   ${obj.internalErrorCode || 'N/A'} (0x${(obj.internalErrorCode >>> 0).toString(16)})\n`;
+                combinedText += `SDK Version:     ${obj.displayVersion || 'N/A'}\n`;
+                if (obj.messageBuffer) {
+                  combinedText += `Description:     ${obj.messageBuffer.trim()}\n`;
+                }
+                if (obj.logReport && obj.logReport.trim()) {
+                  combinedText += `Report Details:  ${obj.logReport.trim()}\n`;
+                }
+                combinedText += `\n`;
+              } catch (e) {
+                // Ignore parse errors for individual files
+              }
+            }
+            lc.textContent = combinedText || 'Failed to parse error history.';
+          } catch (err) {
+            lc.textContent = 'Error loading error history: ' + err.message;
+          }
+          return;
+        }
+
+        let path = '';
+        if (value === 'bfpilot') path = '/data/BFpilot/log.txt';
+        else if (value === 'archive') path = '/data/BFpilot/archive-integrated/archive-worker.log';
+        else if (value === 'search') path = '/data/BFpilot/search_crawl.log';
+        else if (value === 'boot') path = '/data/BFpilot/boot.log';
+        else if (value === 'vsh') path = '/system_data/priv/vshlog/vshlog.0.txt';
+
+        try {
+          const r = await fetch('/fs' + path + '?tail=100000');
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const t = await r.text();
           const autoScroll = (lc.scrollHeight - lc.scrollTop <= lc.clientHeight + 50);
           lc.textContent = t || 'No logs found.';
           if (autoScroll) lc.scrollTop = lc.scrollHeight;
-        }).catch(e => {
-          const lc = el('log-content');
-          if (lc) lc.textContent = 'Error loading logs: ' + e;
-        });
+        } catch (err) {
+          lc.textContent = `Error loading log: ` + err.message;
+        }
       }
 
       el('view-logs').addEventListener('click', () => {
@@ -2134,17 +2467,9 @@
         if (logTimer) { clearInterval(logTimer); logTimer = null; }
       });
 
-      el('log-tab-vsh').addEventListener('click', () => {
-        currentLogPath = '/system_data/priv/vshlog/vshlog.0.txt';
-        el('log-tab-vsh').classList.add('primary');
-        el('log-tab-payload').classList.remove('primary');
-        fetchLogs();
-      });
-
-      el('log-tab-payload').addEventListener('click', () => {
-        currentLogPath = '/data/BFpilot/log.txt';
-        el('log-tab-payload').classList.add('primary');
-        el('log-tab-vsh').classList.remove('primary');
+      el('log-select').addEventListener('change', () => {
+        const lc = el('log-content');
+        if (lc) lc.textContent = 'Loading...';
         fetchLogs();
       });
 
@@ -2154,12 +2479,78 @@
       el('add-shortcut').addEventListener('click', addShortcut);
       el('remove-shortcut').addEventListener('click', removeShortcut);
       el('customize-shortcut').addEventListener('click', customizeShortcut);
+      el('edit-file').addEventListener('click', editSelected);
+      el('editor-save').addEventListener('click', saveEditor);
+      el('editor-close').addEventListener('click', closeEditor);
+
+      el('image-zoom-in').addEventListener('click', () => {
+        imageScale = Math.min(10, imageScale * 1.25);
+        updateImageTransform();
+      });
+      el('image-zoom-out').addEventListener('click', () => {
+        imageScale = Math.max(0.1, imageScale * 0.8);
+        updateImageTransform();
+      });
+      el('image-rotate').addEventListener('click', () => {
+        imageRotate = (imageRotate + 90) % 360;
+        updateImageTransform();
+      });
+      el('image-reset').addEventListener('click', () => {
+        imageScale = 1;
+        imageRotate = 0;
+        imgX = 0;
+        imgY = 0;
+        updateImageTransform();
+      });
+      el('image-close').addEventListener('click', closeImageViewer);
+
+      let isDraggingImage = false;
+      let startX = 0, startY = 0;
+      const stage = el('image-stage');
+
+      stage.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.15 : 0.85;
+        imageScale = Math.min(Math.max(0.1, imageScale * factor), 10);
+        updateImageTransform();
+      }, { passive: false });
+
+      stage.addEventListener('mousedown', (e) => {
+        if (e.target.closest('button')) return;
+        isDraggingImage = true;
+        stage.style.cursor = 'grabbing';
+        startX = e.clientX - imgX;
+        startY = e.clientY - imgY;
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!isDraggingImage) return;
+        imgX = e.clientX - startX;
+        imgY = e.clientY - startY;
+        updateImageTransform();
+      });
+
+      window.addEventListener('mouseup', () => {
+        if (isDraggingImage) {
+          isDraggingImage = false;
+          stage.style.cursor = 'grab';
+        }
+      });
+
+      window.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          if (el('image-overlay').style.display === 'flex') {
+            closeImageViewer();
+          } else if (el('editor-overlay').style.display === 'flex') {
+            closeEditor();
+          }
+        }
+      });
       el('path').addEventListener('keydown', (event) => {
         if (event.key === 'Enter') refresh();
       });
       el('search-go').addEventListener('click', runSearch);
-      el('search-rebuild').addEventListener('click', () => rebuildSearchIndex(false));
-      el('search-system').addEventListener('click', () => rebuildSearchIndex(true));
+      el('search-rebuild').addEventListener('click', rebuildSearchIndex);
       el('search-cancel').addEventListener('click', cancelSearchIndex);
       el('search-clear').addEventListener('click', clearSearch);
       el('search-query').addEventListener('keydown', (event) => {
@@ -2250,12 +2641,12 @@
         btn.disabled = true;
         btn.textContent = 'Exiting...';
       }
-      
+
       try {
-        await fetch('/api/control/shutdown', { method: 'POST' });
+        await fetch('/api/control/shutdown?token=bs5fm-local-reload', { method: 'POST' });
       } catch(e) {
       }
-      
+
       document.body.innerHTML = '<div style="padding: 40px; text-align: center; font-size: 18px;">BFpilot terminated. You may now close this window.</div>';
     }
 

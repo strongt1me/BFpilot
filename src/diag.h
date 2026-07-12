@@ -21,6 +21,7 @@ void bfpilot_diag_set_bind_rc(int rc);
 void bfpilot_diag_set_listen_rc(int rc);
 void bfpilot_diag_mark_first_http(const char *method, const char *path);
 void bfpilot_diag_set_last_errno(int err);
+void bfpilot_diag_set_log_udp_target(const char *ip, unsigned short port);
 
 long bfpilot_diag_uptime(void);
 int bfpilot_diag_last_errno(void);

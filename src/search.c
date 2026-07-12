@@ -361,8 +361,11 @@ static int
 search_skip_system_path(const char *path) {
   static const char *skip[] = {
     "/dev",
+    "/net",
+    "/proc",
+    "/run",
+    "/sys",
     "/mnt/sandbox",
-    "/mnt/shadowmnt",
     NULL
   };
   for(int i = 0; skip[i]; i++) {
@@ -570,7 +573,7 @@ typedef struct {
 static void
 search_save_index(search_index_t *idx) {
   if(!idx || idx->count == 0) return;
-  FILE *f = fopen("/data/BFpilot/search.idx", "wb");
+  FILE *f = fopen("/data/BFpilot/search.idx.tmp", "wb");
   if(!f) return;
 
   uint64_t string_block_size = 0;
@@ -593,7 +596,8 @@ search_save_index(search_index_t *idx) {
   snprintf(hdr.root, sizeof(hdr.root), "%s", idx->root);
   hdr.string_block_size = string_block_size;
 
-  fwrite(&hdr, sizeof(hdr), 1, f);
+  int ok = 1;
+  if(fwrite(&hdr, sizeof(hdr), 1, f) != 1) ok = 0;
 
   idx_entry_t *disk_entries = malloc(idx->count * sizeof(idx_entry_t));
   if(disk_entries) {
@@ -606,15 +610,32 @@ search_save_index(search_index_t *idx) {
       disk_entries[i].size = idx->entries[i].size;
       disk_entries[i].mtime = idx->entries[i].mtime;
     }
-    fwrite(disk_entries, sizeof(idx_entry_t), idx->count, f);
+    if(ok && fwrite(disk_entries, sizeof(idx_entry_t), idx->count, f) != idx->count) ok = 0;
     free(disk_entries);
+  } else {
+    ok = 0;
   }
 
-  for(size_t i=0; i<idx->count; i++) {
-    fwrite(idx->entries[i].path, 1, strlen(idx->entries[i].path) + 1, f);
+  if(ok) {
+    for(size_t i=0; i<idx->count; i++) {
+      size_t len = strlen(idx->entries[i].path) + 1;
+      if(fwrite(idx->entries[i].path, 1, len, f) != len) {
+        ok = 0;
+        break;
+      }
+    }
   }
 
+  fflush(f);
+  int fd = fileno(f);
+  if(fd >= 0) fsync(fd);
   fclose(f);
+
+  if(ok) {
+    rename("/data/BFpilot/search.idx.tmp", "/data/BFpilot/search.idx");
+  } else {
+    unlink("/data/BFpilot/search.idx.tmp");
+  }
 }
 
 static search_index_t *
@@ -831,6 +852,7 @@ typedef struct {
   search_index_t *idx;
   visited_set_t *visited;
   crawl_queue_t queue;
+  dev_t root_dev;
   int system_mode;
   int rc;
   int saved_errno;
@@ -845,10 +867,10 @@ static void *crawler_thread_func(void *arg) {
 
   for(;;) {
     pthread_mutex_lock(&q->lock);
-    while(q->head >= q->count && (!q->done_pushing || q->active_workers > 0) && !search_cancelled()) {
+    while(q->head >= q->count && (!q->done_pushing || q->active_workers > 0) && !search_cancelled() && shared->rc == 0) {
       pthread_cond_wait(&q->cond, &q->lock);
     }
-    if(search_cancelled() || (q->head >= q->count && q->done_pushing && q->active_workers == 0)) {
+    if(search_cancelled() || shared->rc != 0 || (q->head >= q->count && q->done_pushing && q->active_workers == 0)) {
       pthread_mutex_unlock(&q->lock);
       break;
     }
@@ -868,7 +890,7 @@ static void *crawler_thread_func(void *arg) {
 
       pthread_mutex_lock(&q->lock);
       q->active_workers--;
-      if(q->active_workers == 0 && q->head >= q->count) {
+      if(q->active_workers == 0) {
         pthread_cond_broadcast(&q->cond);
       }
       pthread_mutex_unlock(&q->lock);
@@ -925,6 +947,7 @@ static void *crawler_thread_func(void *arg) {
       }
 
       if(stat_rc != 0) {
+        search_diag_log("STAT ERROR (errno=%d) on: %s", errno, child);
         pthread_mutex_lock(&shared->index_lock);
         idx->errors++;
         pthread_mutex_unlock(&shared->index_lock);
@@ -934,22 +957,27 @@ static void *crawler_thread_func(void *arg) {
       pthread_mutex_lock(&shared->index_lock);
       int add_rc = search_index_add(idx, child, &st);
       if(add_rc < 0) {
+        pthread_mutex_lock(&q->lock);
         shared->rc = -1;
         shared->saved_errno = ENOMEM;
         snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
+        pthread_cond_broadcast(&q->cond);
+        pthread_mutex_unlock(&q->lock);
         pthread_mutex_unlock(&shared->index_lock);
         break;
       }
 
       if(S_ISDIR(st.st_mode)) {
         if(!idx->truncated) {
-          /* Use dev+ino to detect symlink loops across any device */
           if(visited_set_add(shared->visited, st.st_dev, st.st_ino) > 0) {
             char *copy = search_strdup(child);
             if(!copy) {
+              pthread_mutex_lock(&q->lock);
               shared->rc = -1;
               shared->saved_errno = ENOMEM;
               snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
+              pthread_cond_broadcast(&q->cond);
+              pthread_mutex_unlock(&q->lock);
               pthread_mutex_unlock(&shared->index_lock);
               break;
             }
@@ -962,9 +990,11 @@ static void *crawler_thread_func(void *arg) {
                 q->cap = next;
               } else {
                 free(copy);
+                pthread_mutex_lock(&q->lock);
                 shared->rc = -1;
                 shared->saved_errno = ENOMEM;
                 snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
+                pthread_cond_broadcast(&q->cond);
                 pthread_mutex_unlock(&q->lock);
                 pthread_mutex_unlock(&shared->index_lock);
                 break;
@@ -993,6 +1023,7 @@ static void *crawler_thread_func(void *arg) {
 
     pthread_mutex_lock(&shared->index_lock);
     if(read_errno != 0) {
+      search_diag_log("READDIR ERROR (errno=%d) during crawl", read_errno);
       shared->saved_errno = read_errno;
       idx->errors++;
     }
@@ -1000,7 +1031,7 @@ static void *crawler_thread_func(void *arg) {
 
     pthread_mutex_lock(&q->lock);
     q->active_workers--;
-    if(q->active_workers == 0 && q->head >= q->count) {
+    if(q->active_workers == 0) {
       pthread_cond_broadcast(&q->cond);
     }
     pthread_mutex_unlock(&q->lock);
@@ -1039,6 +1070,7 @@ crawl_one_root(search_index_t *idx, const char *root, char *error,
   crawl_shared_t shared = {0};
   shared.idx = idx;
   shared.visited = visited;
+  shared.root_dev = root_st.st_dev;
   shared.system_mode = system_mode;
   pthread_mutex_init(&shared.index_lock, NULL);
   pthread_mutex_init(&shared.queue.lock, NULL);

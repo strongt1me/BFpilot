@@ -12,6 +12,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -301,6 +302,7 @@ on_web_ready(unsigned short port, void *arg) {
 
 int
 main(int argc, char **argv) {
+  umask(0);
   bfpilot_boot_marker(BFPILOT_PAYLOAD_NAME, BFPILOT_BUILD_MODE);
   bfpilot_diag_init();
   bfpilot_diag_install_signal_handlers();

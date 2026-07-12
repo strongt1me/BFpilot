@@ -1,23 +1,33 @@
 import sys
 import subprocess
 import os
+import shutil
 
 def main():
     if len(sys.argv) < 2:
         return
     
-    compiler_script = sys.argv[1] # C:/Users/.../prospero-clang
+    compiler_script = sys.argv[1]
     args = sys.argv[2:]
     
-    is_cxx = "clang++" in compiler_script
+    compiler_name = os.path.basename(compiler_script).lower()
+    is_cxx = "++" in compiler_name or "c++" in compiler_name
     
-    sdk = "C:/Users/Blurf/ps5dev/toolchains/ps5-payload-sdk"
-    clang_exe = r"C:\Users\Blurf\scoop\apps\llvm\current\bin\clang.exe"
-    if is_cxx:
-        clang_exe = r"C:\Users\Blurf\scoop\apps\llvm\current\bin\clang++.exe"
+    sdk = os.environ.get("PS5_PAYLOAD_SDK")
+    if not sdk:
+        print("compile_wrapper.py: PS5_PAYLOAD_SDK is not set", file=sys.stderr)
+        sys.exit(2)
+
+    llvm_bindir = os.environ.get("LLVM_BINDIR")
+    clang_name = "clang++.exe" if is_cxx and os.name == "nt" else "clang++" if is_cxx else "clang.exe" if os.name == "nt" else "clang"
+    clang_exe = os.path.join(llvm_bindir, clang_name) if llvm_bindir else ""
     
-    if not os.path.exists(clang_exe):
-        clang_exe = "clang++" if is_cxx else "clang"
+    if not clang_exe or not os.path.exists(clang_exe):
+        found = shutil.which("clang++" if is_cxx else "clang")
+        if not found:
+            print("compile_wrapper.py: clang not found; set LLVM_BINDIR or PATH", file=sys.stderr)
+            sys.exit(2)
+        clang_exe = found
         
     cmd = [clang_exe]
     
@@ -27,7 +37,7 @@ def main():
     cmd += ["--sysroot", sdk]
 
     if is_cxx:
-        cmd += ["-stdlib++-isystem", f"{sdk}/target/include/c++/v1"]
+        cmd += ["-stdlib++-isystem", os.path.join(sdk, "target", "include", "c++", "v1")]
         cmd += ["-frtti", "-fexceptions"]
     cmd += ["-fno-stack-protector", "-fno-plt", "-femulated-tls"]
     

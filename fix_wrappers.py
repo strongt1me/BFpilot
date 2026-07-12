@@ -1,4 +1,6 @@
 import os
+import sys
+
 def rewrite_clang(path):
     with open(path, 'r', encoding='utf-8') as f:
         text = f.read()
@@ -38,5 +40,16 @@ done
             f.write(text)
         print('Fixed ' + path)
 
-rewrite_clang('C:/Users/Blurf/ps5dev/toolchains/ps5-payload-sdk/bin/prospero-clang')
-rewrite_clang('C:/Users/Blurf/ps5dev/toolchains/ps5-payload-sdk/bin/prospero-clang++')
+def main():
+    sdk = os.environ.get("PS5_PAYLOAD_SDK")
+    if len(sys.argv) > 1:
+        sdk = sys.argv[1]
+    if not sdk:
+        print("usage: PS5_PAYLOAD_SDK=/path/to/sdk python fix_wrappers.py [sdk_path]", file=sys.stderr)
+        sys.exit(2)
+
+    rewrite_clang(os.path.join(sdk, "bin", "prospero-clang"))
+    rewrite_clang(os.path.join(sdk, "bin", "prospero-clang++"))
+
+if __name__ == "__main__":
+    main()

@@ -1,63 +1,135 @@
 # BFpilot
 
-BFpilot is a lightweight PS5 payload that serves a browser-based file manager at
-`http://<PS5_IP>:5905/`.
+BFpilot is a PS5 payload that serves a browser-based file manager at `http://<PS5_IP>:5905/`.
+It runs entirely from the PS5 web browser — no app install, no companion app, no extra hardware needed.
 
-The project is split into three payloads:
+The project ships as two payloads:
 
-- `bfpilot.elf` - the main file manager payload with integrated archive
-  extraction.
-- `bfpilot-launcher-installer.elf` - an optional home-screen tile installer.
-- `bfpilot-archive-worker.elf` - a fallback diagnostic archive worker.
+- `bfpilot.elf` — the main file manager with integrated archive extraction.
+- `bfpilot-launcher-installer.elf` — an optional home-screen tile installer (separate for firmware compatibility).
 
-The main payload stays compatibility-focused. It does not import launcher
-installer libraries, does not install the tile, and can be used without
-touching PS5 app installation services.
+---
 
 ## Features
 
-- Browse local PS5 paths from a web browser.
-- Upload and download files.
-- Copy, move, rename, create folders, and delete from the web UI.
-- PS5-side copy and move operations with progress and cancellation.
-- Transfer timing, throughput, and device diagnostics.
-- Extract RAR, 7z, split 7z, and ZIP archives from the main file manager ELF.
-- Clean places sidebar for Root, Homebrew, Mounts, User, Data, mounted drives,
-  and custom shortcuts.
-- Mounted USB/ext drives are shown only when they are actually present.
-- Top storage summary for Data and mounted drives.
-- Persistent custom shortcuts with add, rename, and remove controls.
-- Optional launcher tile that opens `http://127.0.0.1:5905/`.
+### File Management
+- Dual-panel layout — left panel browses, right panel is the copy/move target
+- Browse all major PS5 paths: Root, Data, Homebrew, User, System Data, mounted USB drives
+- Upload files via drag-and-drop or a file picker (with real-time progress, speed, and ETA)
+- Download files (zero-copy via FreeBSD `sendfile` for maximum speed)
+- Copy and Move with background job tracking, progress bar, speed, and cancel support
+- **Conflict Overwrite & Merge Prompts** — when a copy or move would overwrite an existing file or merge into an existing folder, a dialog asks: Overwrite / Merge / Skip — no silent data loss
+- Rename files and folders
+- Create folders
+- Delete (recursive, with cancel support)
+- Click-to-calculate folder sizes
+
+### Selection
+- **Checkbox multi-selection** — every row has a checkbox so you can select multiple files/folders without needing Ctrl+Click (PS5 controller friendly)
+- **Select All** master checkbox in the column header
+- Clicking the row body does single-select; clicking the checkbox toggles without deselecting others
+
+### Search & Indexing
+- **Index All** — multi-threaded work-stealing crawler that indexes all storage roots
+- Instant query results — search resolves in `0ms` from the in-memory index
+- Search results highlight matched terms in both the filename and the path
+- Live index status bar (crawling / done / result count)
+- Cancel indexing at any time
+
+### Archive Extraction
+- **ZIP** — Stored, Deflate, ZIP64, ZipCrypto password, multi-volume `.zip.001` / `.z01` splits
+- **RAR** — RAR4 and RAR5, password-protected, multipart `.part1.rar` volume chains
+- **7z** — LZMA/LZMA2, password-protected, split `.7z.001` sets
+- Password prompt in the browser when the archive is encrypted
+- Extract destination pre-fills from the active Target panel path
+- Extraction progress bar with speed, bytes written, and ETA
+- Partial output cleanup on error or cancel
+- Integrated directly in `bfpilot.elf` — no second payload injection needed
+
+### Image Viewer
+- Built-in viewer for: `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`, `.ico`, `.svg`
+- Click-and-drag **panning**
+- Mouse-wheel **zooming** (0.1× – 10×)
+- 90° **rotation** button
+- **Reset** button to restore original zoom and position
+- Double-click an image to open; `Escape` to close
+
+### Text Editor
+- Inline edit for: `.txt`, `.ini`, `.cfg`, `.log`, `.json`, `.xml`, `.js`, `.py`, `.sh`, `.md`, `.conf`, `.html`, `.css`, `.h`, `.c`, `.cpp`, and more
+- Full-screen overlay editor, saves directly back to the PS5 filesystem
+
+### Log Viewer
+Log button opens a dropdown to pick which log to view:
+
+| Log | Path on PS5 |
+|-----|-------------|
+| BFpilot server log | `/data/BFpilot/log.txt` |
+| Archive extractor log | `/data/BFpilot/archive*/archive-worker.log` |
+| Search crawler log | `/data/BFpilot/search-log.txt` |
+| Boot log | `/data/BFpilot/boot.txt` |
+| PS5 VSH system log | `/system_data/priv/log/vsh.log` |
+| PS5 Error History | `/system_data/priv/error/history/` (decoded) |
+
+The **PS5 Error History** option crawls Sony's crash record folder, decodes the JSON records, and displays error codes (e.g. `NW-102307-3`), Title IDs, firmware version, and timestamps in a human-readable list.
+
+All logs auto-refresh every 2 seconds while the overlay is open.
+
+### Exit Button
+The top-right toolbar has an **Exit** button that shuts down BFpilot cleanly:
+- Sends a loopback TCP wakeup to unblock the `accept()` loop instantly
+- Stops the background archive daemon and search crawler threads gracefully
+- Releases both port `5905` and loader port `9021` immediately
+- **No console reboot needed** — you can re-inject the payload right away
+
+### Navigation & Shortcuts
+- Click-through path breadcrumbs to jump to any parent folder
+- Persistent **custom shortcuts** — add, rename, and remove bookmarks saved to `/data/BFpilot/shortcuts.json`
+- Storage summary (usable free / total / reserved) shown per drive
+- USB drives appear in the sidebar only when physically connected
+
+### Networking & Performance
+- Zero-copy file downloads via FreeBSD `sendfile` syscall
+- 2 MB socket send/receive buffers (`SO_SNDBUF` / `SO_RCVBUF`)
+- `TCP_NODELAY` — eliminates Nagle algorithm latency
+- Virtual DOM row recycling — handles 10,000+ file directories without the PS5 browser running out of memory (OOM)
+- Case-insensitive `strcasestr` search — no duplicate lowercase index, 50% less RAM
+
+### Permission Handling
+BFpilot automatically sets permissions to `0777` on everything it creates (copies, uploads, extracted files, created folders). This bypasses PS5 filesystem permission issues transparently. There is no manual `chmod` UI — it is always applied automatically.
+
+### Diagnostics
+- `/api/status` — version, build tag
+- `/api/diag` — full runtime diagnostics: socket bind/listen, UserService, NotificationService, launcher, last errno, first HTTP request
+- SIGSEGV/SIGBUS crash handler — logs crash address to `/data/BFpilot/crash.txt`
+
+---
 
 ## Download
 
-Use the release assets:
+Get the latest release from the [Releases page](https://github.com/ItsBlurf/BFpilot/releases).
 
-- `bfpilot.elf` for the file manager and archive extraction.
-- `bfpilot-launcher-installer.elf` only if you want the PS5 home-screen tile.
-- `bfpilot-archive-worker.elf` only as a fallback diagnostic archive worker.
+- **`bfpilot.elf`** — inject this first, always. Contains the file manager and archive engine.
+- **`bfpilot-launcher-installer.elf`** — inject only if you want the PS5 home-screen tile.
 
-Run `bfpilot.elf` first. It serves the web UI and starts the integrated archive
-daemon; archive extraction does not require injecting another payload. Run the
-launcher installer payload only if you want the tile.
+---
 
 ## Usage
 
-Inject the file manager payload to your loader, usually on port `9021`:
+Inject the payload to your loader (usually port `9021`):
 
 ```sh
 python3 payload_sender.py <PS5_IP> 9021 bfpilot.elf
 ```
 
-Open:
+Open the web UI:
 
-```text
+```
 http://<PS5_IP>:5905/
 ```
 
-Health checks:
+Health check endpoints:
 
-```text
+```
 http://<PS5_IP>:5905/api/status
 http://<PS5_IP>:5905/api/diag
 http://<PS5_IP>:5905/api/fs/places
@@ -69,58 +141,9 @@ Install or refresh the launcher tile:
 python3 payload_sender.py <PS5_IP> 9021 bfpilot-launcher-installer.elf
 ```
 
-The tile opens:
+The tile opens `http://127.0.0.1:5905/`.
 
-```text
-http://127.0.0.1:5905/
-```
-
-## Archive Extraction
-
-Archive extraction is integrated into `bfpilot.elf`. The file manager prepares
-jobs, starts a lightweight archive daemon, and reports progress through the web
-API. `bfpilot-archive-worker.elf` is kept as a fallback diagnostic build of the
-same archive engine.
-
-From the web UI:
-
-1. Select one archive file.
-2. Click `Extract`.
-3. Choose a destination under `/data` or a mounted USB/ext drive.
-4. Enter a password if the archive needs one.
-5. Watch the progress panel.
-
-The UI polls:
-
-```text
-http://<PS5_IP>:5905/api/fs/archive/status
-```
-
-Supported today:
-
-- RAR, including passworded archives and normal multipart RAR sets when every
-  part is present beside the first volume.
-- 7z, passworded 7z, and `.7z.001` split sets.
-- ZIP stored/deflate entries, ZIP64 sizes/offsets, and traditional ZipCrypto
-  passwords.
-
-Extraction uses conservative archive-engine threading by default. The archive
-API accepts `threads=0` for automatic tuning. 7z auto mode is currently capped
-at 2 effective threads; RAR is clamped to 1 effective thread until large-archive
-PS5 stability is proven after the `perf5` crash investigation. Status responses
-include `threads`, `effectiveThreads`, `threadMode`, elapsed time, average MB/s,
-input/output timing counters, and best-effort archive priority fields. RAR
-status also reports thread-pool counters such as `rarMtThreadedBlocks` and
-`rarMtLargeBlocks` for diagnostics, but normal RAR extraction should report
-`effectiveThreads=1` for now.
-
-Known limits:
-
-- ZIP AES encryption reports unsupported.
-- Split ZIP is not implemented yet.
-- Archive jobs cannot be cancelled from the browser after extraction starts.
-- Failed extractions leave the BFpilot-owned staging folder in place for
-  inspection instead of deleting evidence.
+---
 
 ## Build
 
@@ -134,48 +157,33 @@ make inspect-imports
 
 Expected outputs:
 
-```text
+```
 bfpilot.elf
 bfpilot-launcher-installer.elf
-bfpilot-archive-worker.elf
 ```
 
-`make inspect-imports` verifies that the file manager payload does not contain
-launcher/AppInstUtil imports and that the isolated installer contains the
-required installer imports. The file manager may include archive engine code,
-but it must remain launcher-free.
+`make inspect-imports` verifies that `bfpilot.elf` contains no launcher/AppInstUtil imports and that the installer contains the required ones.
 
-## Diagnostics
+---
 
-Local read-only diagnostics:
+## Diagnostics & Testing
+
+Read-only diagnostics:
 
 ```sh
 PS5_IP=<PS5_IP> BF_WEB_PORT=5905 make ps5-diag
 ```
 
-Read-only storage accounting audit for Settings/BFpilot free-space mismatches:
+Storage audit (free-space mismatch investigation):
 
 ```sh
 PS5_IP=<PS5_IP> BF_WEB_PORT=5905 make ps5-storage-audit
-PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
-python3 scripts/ps5_storage_audit.py --deep --settings-free-gb 18
 ```
 
-Smoke test the file APIs using only BFpilot-created files under `/data/test`:
+Smoke test (uses only files under `/data/test`):
 
 ```sh
-PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
-BF_ALLOW_PS5_WRITE=1 \
-make ps5-smoke
-```
-
-Optional benchmark mode writes under `/data/test/bfpilot-bench` by default:
-
-```sh
-PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
-BF_ALLOW_PS5_WRITE=1 \
-BF_ALLOWED_REMOTE_ROOTS=/data/test/bfpilot-bench \
-python3 scripts/ps5_diag.py --bench
+PS5_IP=<PS5_IP> BF_WEB_PORT=5905 BF_ALLOW_PS5_WRITE=1 make ps5-smoke
 ```
 
 Archive performance harness:
@@ -189,37 +197,32 @@ PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
 make ps5-archive-perf
 ```
 
-The harness uploads the archive once under a BFpilot-owned test folder,
-extracts to separate destinations for each requested thread count, saves
-`diagnostics/ps5-archive-perf-*.json`, captures archive logs, and deletes only
-its own test folder by default. Use manual thread counts above 2 only for
-controlled stability testing.
+Runtime logs on the PS5:
 
-Runtime logs are stored on the PS5 at:
-
-```text
-/data/BFpilot/boot.log
+```
 /data/BFpilot/log.txt
-/data/BFpilot/crash.log
-/data/BFpilot/launcher-installer.log
+/data/BFpilot/boot.txt
+/data/BFpilot/crash.txt
 /data/BFpilot/archive-integrated/archive-worker.log
 /data/BFpilot/archive-integrated/status.json
-/data/BFpilot/archive/archive-worker.log
-/data/BFpilot/archive/status.json
 ```
 
-## Compatibility Notes
+---
 
-`bfpilot.elf` is launcher-free by design. It avoids AppInstUtil,
-SystemService, UserService, and privileged launcher imports because those can
-fail before `main()` on some firmware/loader combinations. Archive extraction
-is integrated into the main ELF, but only through libc/network-safe archive
-code and the BFpilot-owned job/status files under
-`/data/BFpilot/archive-integrated`.
+## Compatibility
 
-`bfpilot-launcher-installer.elf` is separate and uses the complete launcher
-installer dependency set. If launcher installation fails on a firmware, the file
-manager payload remains usable.
+`bfpilot.elf` is launcher-free by design. It avoids AppInstUtil, SystemService, UserService, and other privileged launcher imports that can fail before `main()` on some firmware and loader combinations. Archive extraction is integrated via libc-safe archive code only.
 
-More detail is in [docs/COMPATIBILITY_STRATEGY.md](docs/COMPATIBILITY_STRATEGY.md)
-and [docs/FIRMWARE_TESTING.md](docs/FIRMWARE_TESTING.md).
+`bfpilot-launcher-installer.elf` is separate and uses the full launcher dependency set. If it fails on a firmware, the file manager remains fully usable.
+
+See [docs/COMPATIBILITY_STRATEGY.md](docs/COMPATIBILITY_STRATEGY.md) and [docs/FIRMWARE_TESTING.md](docs/FIRMWARE_TESTING.md) for details.
+
+---
+
+## Credits & Third-Party
+
+- **[owendswang/ps5-web-file-manager](https://github.com/owendswang/ps5-web-file-manager)** — The image viewer (zoom, pan, rotate) and checkbox multi-selection UI were inspired by owendswang's implementation. Their work was referenced when designing BFpilot's approach to those features.
+- **[ps5-payload-dev](https://github.com/ps5-payload-dev)** — PS5 payload SDK, websrv, and related tooling.
+- **[UnRAR source](https://www.rarlab.com/rar_add.htm)** — RAR extraction via the freeware UnRAR library (© Alexander Roshal).
+- **[miniz](https://github.com/richgel999/miniz)** — ZIP decompression (public domain / Unlicense).
+- **[LZMA SDK](https://www.7-zip.org/sdk.html)** — 7z decompression (public domain, Igor Pavlov).

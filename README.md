@@ -233,7 +233,7 @@ See [docs/COMPATIBILITY_STRATEGY.md](docs/COMPATIBILITY_STRATEGY.md) and [docs/F
 
 ## Credits & Third-Party
 
-- **[owendswang/ps5-web-file-manager](https://github.com/owendswang/ps5-web-file-manager)** — Image viewer (zoom, pan, rotate) and checkbox multi-selection UI were inspired by owendswang’s work.
+- **[owendswang/ps5-web-file-manager](https://github.com/owendswang/ps5-web-file-manager)** — Image viewer and checkbox multi-selection UI were inspired by owendswang’s work.
 - **[ps5-payload-dev](https://github.com/ps5-payload-dev)** — PS5 payload SDK, websrv, and related tooling.
 - **[UnRAR source](https://www.rarlab.com/rar_add.htm)** — RAR extraction via the freeware UnRAR library (© Alexander Roshal).
 - **[miniz](https://github.com/richgel999/miniz)** — ZIP decompression (public domain / Unlicense).

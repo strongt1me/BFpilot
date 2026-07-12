@@ -2,6 +2,23 @@
 
 This document outlines the modifications, optimizations, and new features introduced in this optimized version of **BFpilot** compared to the original payload.
 
+## v0.3.9 — Index All stability & coverage (2026-07-12)
+
+### Search / Index All
+
+* **Priority multi-root crawl** for useful storage first: `/data`, `/user` (+ important subtrees), `/mnt/usb*`, `/mnt/ext*`, then system mounts, then `/`.
+* **Same-device (XDEV) fencing** — record mountpoint directories but do not descend across `st_dev` (avoids nullfs/sandbox recursion and KP risk under P2JB/Y2JB).
+* **Never full-crawl** `/mnt`, `/system_tmp`, `/update`, `/mnt/sandbox`, `/mnt/shadowmnt`, or pseudo FS roots.
+* **Soft-fail per root** — one bad mount no longer aborts the entire Index All or discards a partial index.
+* **Visited-set fix** for filesystems that report `st_dev == 0` (broken empty-slot logic).
+* **Always `lstat`** so search results keep real sizes/mtimes (removed DT_REG zero-size shortcut).
+* **4 crawl workers** (was 8) for calmer FS load on 11.60 + P2JB.
+* Status API/UI: `rootsTried`, `rootsSucceeded`, `rootsFailed`, `rootsOk`, `rootsFail`.
+
+Hardware notes: validated root discovery + pre-fix ~18k-entry index on FW 11.60 @ `192.168.1.204`; post-deploy HTTP hang required console re-JB before re-measure.
+
+---
+
 ## v0.3.8 — Test Build Clean (2026-07-12)
 
 ### New Features

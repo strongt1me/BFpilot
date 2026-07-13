@@ -30,9 +30,16 @@
 #define BFPILOT_TRANSFER_BUF_SIZE (8 * 1024 * 1024)
 #endif
 
+/*
+ * Upload buffer — zftpd FTP_STREAM_BUFFER_SIZE on PS5 / ftpsrv IO_COPY_BUFSIZE.
+ * Single-buffer STOR only (no double-buffer writer on PS4/PS5 — zftpd docs).
+ */
+#ifndef BFPILOT_UPLOAD_BUF_SIZE
+#define BFPILOT_UPLOAD_BUF_SIZE (1 * 1024 * 1024)
+#endif
+
 #define COPY_BUF_SIZE   BFPILOT_TRANSFER_BUF_SIZE
-#define UPLOAD_BUF_SIZE BFPILOT_TRANSFER_BUF_SIZE
-#define UPLOAD_PREALLOC_MIN_SIZE (64UL * 1024UL * 1024UL)
+#define UPLOAD_BUF_SIZE BFPILOT_UPLOAD_BUF_SIZE
 #define BFPILOT_SPACE_MARGIN_BYTES (256ULL * 1024ULL * 1024ULL)
 #define BFPILOT_DATA_ROOT "/data"
 #define BFPILOT_DATA_DIR "/data/BFpilot"
@@ -67,8 +74,6 @@ apply_chmod_0777(const char *path) {
 #define BFPILOT_ARCHIVE_DEFAULT_NICE 4
 #define BFPILOT_ARCHIVE_MIN_NICE -20
 #define BFPILOT_ARCHIVE_MAX_NICE 20
-
-extern int posix_fallocate(int fd, off_t offset, off_t len);
 
 typedef struct json_buf {
   char  *data;
@@ -173,6 +178,9 @@ serve_error(const http_request_t *req, int status, const char *msg) {
 
 
 static int write_all_fd(int fd, const void *data, size_t size);
+static int check_free_space_for_bytes(const char *path, unsigned long long required,
+                                      unsigned long long *available_out,
+                                      unsigned long long *needed_out);
 static void drain_body(int fd, size_t already_read, size_t content_size);
 
 
@@ -335,7 +343,12 @@ static struct upload_state g_upload = {
 };
 
 atomic_int g_archive_busy = 0;
+#if BFPILOT_ENABLE_INTEGRATED_ARCHIVE
 extern int g_archive_cancel;
+#else
+/* Defined here when archive objects are not linked (ENABLE_ARCHIVE=0). */
+int g_archive_cancel = 0;
+#endif
 
 
 int
@@ -468,6 +481,11 @@ size_walker(const char *path, long *items, long *bytes, int count_dirs) {
 
 
 static int
+fs_error_is_fatal(int err) {
+  return err == EIO || err == ESTALE || err == EBADF || err == EFAULT;
+}
+
+static int
 copy_file(const char *src, const char *dst) {
   int in = open(src, O_RDONLY);
   if(in < 0) {
@@ -482,6 +500,7 @@ copy_file(const char *src, const char *dst) {
   }
   apply_fchmod_0777(out);
 
+  /* Large sequential I/O (zftpd/ps5upload): multi-MiB buffer, no tiny chunks. */
   void *buf = malloc(COPY_BUF_SIZE);
   if(!buf) {
     close(in);
@@ -489,6 +508,10 @@ copy_file(const char *src, const char *dst) {
     unlink(dst);
     return -1;
   }
+
+#ifdef POSIX_FADV_SEQUENTIAL
+  (void)posix_fadvise(in, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
 
   int rc = 0;
   job_set_current(src);
@@ -498,6 +521,8 @@ copy_file(const char *src, const char *dst) {
       if(errno == EINTR) continue;
       job_set_error("read(%s): %s", src, strerror(errno));
       rc = -1;
+      /* Fatal vnode errors: abort; do not retry the same fd. */
+      if(fs_error_is_fatal(errno)) break;
       break;
     }
     if(r == 0) break;
@@ -513,7 +538,9 @@ copy_file(const char *src, const char *dst) {
         break;
       }
       if(w == 0) {
-        errno = EIO;
+        /* PFS often signals ENOSPC this way. */
+        errno = ENOSPC;
+        job_set_error("write(%s): no space or short write", dst);
         rc = -1;
         break;
       }
@@ -742,22 +769,72 @@ copy_worker(void *arg) {
   }
   join_path(final_dst, sizeof(final_dst), a->dst, base);
 
+  /*
+   * Destination existence check. After a successful overwrite unlink, errno may
+   * be 0 — do NOT treat that as failure (was: "destination: No error" and 0-byte
+   * copy jobs).
+   */
   if(lstat(final_dst, &final_st) == 0) {
     if(!a->overwrite) {
       job_end(-1, "destination already exists");
       free(a);
       return NULL;
     }
-    if(!S_ISDIR(final_st.st_mode)) {
-      (void)unlink(final_dst);
+    if(S_ISDIR(final_st.st_mode)) {
+      job_end(-1, "destination is a directory");
+      free(a);
+      return NULL;
     }
-  }
-  if(errno != ENOENT) {
+    if(unlink(final_dst) != 0) {
+      char err[160];
+      snprintf(err, sizeof(err), "destination unlink: %s", strerror(errno));
+      job_end(-1, err);
+      free(a);
+      return NULL;
+    }
+  } else if(errno != ENOENT) {
     char err[160];
     snprintf(err, sizeof(err), "destination: %s", strerror(errno));
     job_end(-1, err);
     free(a);
     return NULL;
+  }
+
+  /*
+   * Free-space preflight after overwrite unlink (so reclaimed space counts).
+   * Same-device rename move needs no extra bytes; copy and EXDEV-move do.
+   */
+  {
+    int need_space = 1;
+    if(a->is_move && stat(a->dst, &dst_st) == 0 &&
+       (dev_t)dst_st.st_dev == src_st.st_dev) {
+      need_space = 0;
+    }
+    if(need_space && bytes > 0) {
+      unsigned long long available = 0, needed = 0;
+      int space_rc = check_free_space_for_bytes(
+          a->dst, (unsigned long long)bytes, &available, &needed);
+      if(space_rc < 0) {
+        char err[160];
+        snprintf(err, sizeof(err), "statvfs target: %s", strerror(errno));
+        job_end(-1, err);
+        free(a);
+        return NULL;
+      }
+      if(space_rc > 0) {
+        char err[192];
+        snprintf(err, sizeof(err),
+                 "not enough free space for %s: need %llu bytes, available %llu",
+                 a->is_move ? "move" : "copy", needed, available);
+        bfpilot_log("transfer space preflight fail verb=%s need=%llu avail=%llu dst=%s",
+                    a->is_move ? "move" : "copy", needed, available, a->dst);
+        job_end(-1, err);
+        free(a);
+        return NULL;
+      }
+      bfpilot_log("transfer space preflight ok verb=%s need=%llu avail=%llu dst=%s",
+                  a->is_move ? "move" : "copy", needed, available, a->dst);
+    }
   }
 
   int n = snprintf(staging_dst, sizeof(staging_dst), "%s.bfpilot-part-%ld-%ld",
@@ -2377,21 +2454,15 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
   }
   apply_fchmod_0777(out);
 
-  int prealloc_attempted = 0;
-  int prealloc_rc = 0;
-  if(content_size >= UPLOAD_PREALLOC_MIN_SIZE) {
-    prealloc_attempted = 1;
-    prealloc_rc = posix_fallocate(out, 0, (off_t)content_size);
-    if(prealloc_rc == ENOSPC || prealloc_rc == EFBIG) {
-      close(out);
-      unlink(staging_path);
-      return serve_error(req, 507, strerror(prealloc_rc));
-    }
-    if(prealloc_rc != 0) {
-      bfpilot_log("upload posix_fallocate ignored rc=%d path=%s size=%lu",
-                  prealloc_rc, staging_path, (unsigned long)content_size);
-    }
-  }
+  /*
+   * No posix_fallocate on the upload path.
+   *
+   * For multi‑GB bodies, fallocate on PFS can take a long time while the
+   * browser is already streaming the POST body. Kernel RCVBUF fills, the
+   * TCP window closes, and measured rates collapse to 1–2 MB/s (or stall).
+   * Free space is already preflighted via statvfs; free-space mid-write
+   * still fails cleanly. Matches v0.3.1-test6-perf8 and zftpd STOR.
+   */
 
   char *buf = malloc(UPLOAD_BUF_SIZE);
   if(!buf) {
@@ -2406,21 +2477,35 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
   size_t bytes = 0;
   size_t remaining = content_size;
   long started_ms = monotonic_ms();
+  long recv_ms = 0;
+  long write_ms = 0;
 
   if(initial_size > remaining) initial_size = remaining;
   if(initial_size > 0) {
+    long w0 = monotonic_ms();
     if(write_all_fd(out, initial_data, initial_size) != 0) {
       failed = 1;
       snprintf(err, sizeof(err), "write: %s", strerror(errno));
     } else {
       bytes += initial_size;
     }
+    write_ms += monotonic_ms() - w0;
     remaining -= initial_size;
   }
 
-  while(remaining > 0) {
+  /*
+   * Exact zftpd PS5 STOR / ftpsrv STOR / perf8 pattern:
+   *   recv(up to 1 MiB) → write that many bytes → recv again.
+   * Do NOT use MSG_WAITALL to fill a full MiB before writing: that lengthens
+   * the no-recv window during PFS crypto and can zero-window the sender
+   * (zftpd: double-buffer + small RCVBUF stalls; single-buffer after each
+   * write reopens the window within one write cycle).
+   */
+  while(!failed && remaining > 0) {
     size_t want = remaining < UPLOAD_BUF_SIZE ? remaining : UPLOAD_BUF_SIZE;
+    long r0 = monotonic_ms();
     ssize_t n = recv(req->fd, buf, want, 0);
+    long r1 = monotonic_ms();
     if(n < 0) {
       if(errno == EINTR) continue;
       failed = 1;
@@ -2432,15 +2517,17 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
       snprintf(err, sizeof(err), "short upload");
       break;
     }
+    recv_ms += r1 - r0;
     remaining -= (size_t)n;
-    if(!failed) {
-      if(write_all_fd(out, buf, (size_t)n) != 0) {
-        failed = 1;
-        snprintf(err, sizeof(err), "write: %s", strerror(errno));
-      } else {
-        bytes += (size_t)n;
-      }
+
+    long w0 = monotonic_ms();
+    if(write_all_fd(out, buf, (size_t)n) != 0) {
+      failed = 1;
+      snprintf(err, sizeof(err), "write: %s", strerror(errno));
+      break;
     }
+    write_ms += monotonic_ms() - w0;
+    bytes += (size_t)n;
   }
 
   free(buf);
@@ -2469,11 +2556,11 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
   double mbps = elapsed_ms > 0 ?
       ((double)bytes * 1000.0 / (double)elapsed_ms) / (1024.0 * 1024.0) : 0.0;
   bfpilot_log("upload end rc=%d errno=%d bytes_read=%lu bytes_written=%lu "
-              "elapsed_ms=%ld average_mbps=%.2f dst_dev=%lu "
-              "prealloc_attempted=%d prealloc_rc=%d path=%s",
+              "elapsed_ms=%ld average_mbps=%.2f recv_ms=%ld write_ms=%ld "
+              "dst_dev=%lu buf_size=%u path=%s",
               failed ? -1 : 0, saved_errno, (unsigned long)bytes,
-              (unsigned long)bytes, elapsed_ms, mbps, destination_dev,
-              prealloc_attempted, prealloc_rc, final_path);
+              (unsigned long)bytes, elapsed_ms, mbps, recv_ms, write_ms,
+              destination_dev, (unsigned int)UPLOAD_BUF_SIZE, final_path);
 
   if(failed) {
     drain_body(req->fd, 0, remaining);
@@ -2487,10 +2574,11 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
      json_string(&b, final_path) != 0 ||
      json_appendf(&b,
                   ",\"size\":%lu,\"elapsedMs\":%ld,\"averageMBps\":%.2f,"
-                  "\"destinationDev\":%lu,\"preallocate\":{\"attempted\":%s,"
-                  "\"rc\":%d}}",
-                  (unsigned long)bytes, elapsed_ms, mbps, destination_dev,
-                  prealloc_attempted ? "true" : "false", prealloc_rc) != 0) {
+                  "\"recvMs\":%ld,\"writeMs\":%ld,"
+                  "\"destinationDev\":%lu,\"bufSize\":%u,"
+                  "\"pathStyle\":\"zftpd-single-buffer-stor\"}",
+                  (unsigned long)bytes, elapsed_ms, mbps, recv_ms, write_ms,
+                  destination_dev, (unsigned int)UPLOAD_BUF_SIZE) != 0) {
     free(b.data);
     return -1;
   }

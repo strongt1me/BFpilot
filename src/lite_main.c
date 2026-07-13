@@ -28,7 +28,6 @@
 #include "transfer.h"
 #include "version.h"
 #include "websrv.h"
-#include "archive_worker.h"
 #include "search.h"
 
 #define BFPILOT_RELOAD_TOKEN "bs5fm-local-reload"
@@ -196,6 +195,7 @@ json_long_field(const char *json, const char *field) {
 }
 
 
+/* Reinjection handoff — restored to v0.3.8 behavior (do not gate on search). */
 static int
 old_server_busy(unsigned short port) {
   char response[2048];

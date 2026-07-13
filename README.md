@@ -98,8 +98,8 @@ The top-right toolbar has an **Exit** button that shuts down BFpilot cleanly:
 
 ### Networking & Performance
 - Buffered HTTP downloads (read from file, write to socket)
-- 2 MB socket send/receive buffer requests (`SO_SNDBUF` / `SO_RCVBUF`) on accepted connections
-- `TCP_NODELAY` on accepted connections
+- Fast web upload path (zftpd/ftpsrv/perf8 style): 1 MiB single-buffer recv→write, no pre-upload `posix_fallocate`
+- `SO_RCVBUF` 4 MiB on the **listen** socket (and requested again post-accept); no `TCP_NODELAY` on bulk accepts
 - Virtual row recycling in the file list UI for large directories
 - Case-insensitive search without storing a second lowercase copy of every path string
 

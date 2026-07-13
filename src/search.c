@@ -35,9 +35,10 @@
 #define BFPILOT_SEARCH_MAX_LIMIT 1000UL
 #define BFPILOT_SEARCH_PROGRESS_INTERVAL 2048UL
 #define BFPILOT_SEARCH_CRAWL_NICE 4
-/* Keep worker count moderate: P2JB/Y2JB 11.xx can KP under heavy FS thrash. */
-#define BFPILOT_SEARCH_WORKER_THREADS 4
-#define BFPILOT_SEARCH_ROOT_ERR_ABORT 32
+/* Single-threaded crawl: multi-worker + shared visited/index was a crash/hang
+ * risk under P2JB (lock nesting + FS thrash). Sequential is still fast for
+ * typical PS5 path counts and far more stable. */
+#define BFPILOT_SEARCH_ROOT_ERR_ABORT 64
 
 typedef struct json_buf {
   char  *data;
@@ -449,9 +450,7 @@ add_system_root(char roots[][1024], int *count, const char *root,
   for(int i = 0; i < *count; i++) {
     if(!strcmp(roots[i], root)) return;
   }
-  search_diag_log("ROOT ADD: %s (dev=%llu ino=%llu)", root,
-                  (unsigned long long)st.st_dev,
-                  (unsigned long long)st.st_ino);
+  /* Keep crawl log light — verbose ROOT ADD spam hurt FS under P2JB. */
   snprintf(roots[*count], 1024, "%s", root);
   (*count)++;
 }
@@ -464,25 +463,14 @@ collect_system_roots(char roots[][1024]) {
   int have_base_dev = lstat("/", &root_st) == 0 && S_ISDIR(root_st.st_mode);
   dev_t base_dev = have_base_dev ? root_st.st_dev : 0;
 
-  /* High-value user storage first so a later root failure still yields a useful
-   * partial index if we ever stop early. */
+  /* Mount-level roots only. Nested force-roots re-walk the same trees and
+   * thrash FS under P2JB. XDEV covers children within each mount. */
   static const char *priority[] = {
     "/data",
-    "/data/homebrew",
-    "/data/downloads",
     "/user",
-    "/user/app",
-    "/user/appmeta",
-    "/user/download",
-    "/user/addcont",
-    "/user/patch",
-    "/user/savedata",
-    "/user/home",
-    "/user/av_contents",
     NULL
   };
   for(int i = 0; priority[i]; i++) {
-    /* force=1: keep explicit useful views even when dev ids collide oddly. */
     add_system_root(roots, &count, priority[i], have_base_dev, base_dev, 1);
   }
 
@@ -501,21 +489,24 @@ collect_system_roots(char roots[][1024]) {
     "/preinst",
     "/preinst2",
     "/hostapp",
+    "/download",
+    "/usb",
+    "/app",
+    "/mnt/disc",
     NULL
   };
   for(int i = 0; system_candidates[i]; i++) {
     add_system_root(roots, &count, system_candidates[i], have_base_dev, base_dev, 0);
   }
 
-  /* Root filesystem last: tiny on many firmwares; XDEV-fenced. */
   add_system_root(roots, &count, "/", 0, 0, 1);
 
-  /* Dynamic discovery of other top-level mounts (firmware-specific). */
   DIR *dir = opendir("/");
   if(dir) {
     struct dirent *ent;
     while((ent = readdir(dir)) != NULL) {
       if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+      if(ent->d_type == DT_REG) continue;
       char child[1024];
       if(strlen(ent->d_name) + 2 >= sizeof(child)) continue;
       snprintf(child, sizeof(child), "/%s", ent->d_name);
@@ -730,6 +721,17 @@ search_load_index(void) {
     fclose(f);
     return NULL;
   }
+  /* Reject corrupt headers that would hang/OOM the HTTP thread. */
+  if(hdr.count == 0 ||
+     hdr.count > BFPILOT_SEARCH_MAX_ENTRIES ||
+     hdr.string_block_size == 0 ||
+     hdr.string_block_size > (uint64_t)BFPILOT_SEARCH_MAX_ENTRIES * 1024ULL) {
+    search_diag_log("load_index reject count=%llu str=%llu",
+                    (unsigned long long)hdr.count,
+                    (unsigned long long)hdr.string_block_size);
+    fclose(f);
+    return NULL;
+  }
 
   search_index_t *idx = calloc(1, sizeof(*idx));
   if(!idx) {
@@ -737,9 +739,9 @@ search_load_index(void) {
     return NULL;
   }
 
-  idx->entries = malloc(hdr.count * sizeof(search_entry_t));
-  idx->string_block = malloc(hdr.string_block_size);
-  idx_entry_t *disk_entries = malloc(hdr.count * sizeof(idx_entry_t));
+  idx->entries = malloc((size_t)hdr.count * sizeof(search_entry_t));
+  idx->string_block = malloc((size_t)hdr.string_block_size);
+  idx_entry_t *disk_entries = malloc((size_t)hdr.count * sizeof(idx_entry_t));
 
   if(!idx->entries || !idx->string_block || !disk_entries) {
     free(idx->entries);
@@ -867,6 +869,15 @@ finish_build(search_index_t *idx, int rc, const char *error, int saved_errno,
               "files=%lu elapsed_ms=%ld stale=%d error=%s",
               rc, saved_errno, log_entries, log_dirs, log_files,
               log_elapsed_ms, log_stale, error ? error : "");
+  /* Agent-reachable summary line for post-session diagnosis. */
+  {
+    double eps = log_elapsed_ms > 0
+                     ? ((double)log_entries * 1000.0) / (double)log_elapsed_ms
+                     : 0.0;
+    bfpilot_log("search rebuild stats unique_entries=%lu dirs_scanned=%lu "
+                "files=%lu rate_entries_per_s=%.1f build_ms=%ld",
+                log_entries, log_dirs, log_files, eps, log_elapsed_ms);
+  }
 }
 
 
@@ -928,250 +939,26 @@ visited_set_free(visited_set_t *set) {
 }
 
 
-typedef struct {
-  char **dirs;
-  size_t count;
-  size_t cap;
-  size_t head;
-  int done_pushing;
-  int active_workers;
-  pthread_mutex_t lock;
-  pthread_cond_t cond;
-} crawl_queue_t;
-
-typedef struct {
-  search_index_t *idx;
-  visited_set_t *visited;
-  crawl_queue_t queue;
-  dev_t root_dev;
-  int system_mode;
-  int same_device; /* FreeBSD FTS_XDEV style: do not cross mounts */
-  int rc;
-  int saved_errno;
-  char error[256];
-  unsigned long mount_skips;
-  unsigned long root_errors;
-  pthread_mutex_t index_lock;
-} crawl_shared_t;
-
-static void *crawler_thread_func(void *arg) {
-  crawl_shared_t *shared = arg;
-  search_index_t *idx = shared->idx;
-  crawl_queue_t *q = &shared->queue;
-
-  for(;;) {
-    pthread_mutex_lock(&q->lock);
-    while(q->head >= q->count && (!q->done_pushing || q->active_workers > 0) && !search_cancelled() && shared->rc == 0) {
-      pthread_cond_wait(&q->cond, &q->lock);
-    }
-    if(search_cancelled() || shared->rc != 0 || (q->head >= q->count && q->done_pushing && q->active_workers == 0)) {
-      pthread_mutex_unlock(&q->lock);
-      break;
-    }
-
-    char *dir_path = q->dirs[q->head++];
-    q->active_workers++;
-    pthread_mutex_unlock(&q->lock);
-
-    DIR *dir = opendir(dir_path);
-    if(!dir) {
-      pthread_mutex_lock(&shared->index_lock);
-      shared->saved_errno = errno;
-      idx->errors++;
-      pthread_mutex_unlock(&shared->index_lock);
-      search_diag_log("FAIL: opendir(%s) = %s", dir_path, strerror(errno));
-      free(dir_path);
-
-      pthread_mutex_lock(&q->lock);
-      q->active_workers--;
-      if(q->active_workers == 0) {
-        pthread_cond_broadcast(&q->cond);
-      }
-      pthread_mutex_unlock(&q->lock);
-      continue;
-    }
-
-    pthread_mutex_lock(&shared->index_lock);
-    idx->dirs_scanned++;
-    if((idx->dirs_scanned % BFPILOT_SEARCH_PROGRESS_INTERVAL) == 0) {
-      publish_progress(idx, dir_path, NULL, 0);
-    }
-    int is_truncated = idx->truncated;
-    pthread_mutex_unlock(&shared->index_lock);
-
-    struct dirent *ent;
-    int read_errno = 0;
-    for(;;) {
-      errno = 0;
-      ent = readdir(dir);
-      if(!ent) {
-        read_errno = errno;
-        break;
-      }
-
-      if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) {
-        continue;
-      }
-      if(search_cancelled()) break;
-
-      char child[1024];
-      if(strlen(dir_path) + strlen(ent->d_name) + 2 >= sizeof(child)) {
-        pthread_mutex_lock(&shared->index_lock);
-        idx->skipped++;
-        pthread_mutex_unlock(&shared->index_lock);
-        continue;
-      }
-      join_path(child, sizeof(child), dir_path, ent->d_name);
-
-      if(search_skip_system_path(child)) {
-        pthread_mutex_lock(&shared->index_lock);
-        idx->skipped++;
-        pthread_mutex_unlock(&shared->index_lock);
-        continue;
-      }
-
-      /* Always lstat: d_type is non-portable and skipping it zeroed sizes,
-       * which made search results far less useful than Everything-style UIs. */
-      struct stat st = {0};
-      if(lstat(child, &st) != 0) {
-        int e = errno;
-        /* Soft-fail: bad entries should not kill the whole root. */
-        if(e == EIO || e == ESTALE || e == EFAULT || e == EBADF) {
-          pthread_mutex_lock(&shared->index_lock);
-          shared->root_errors++;
-          idx->errors++;
-          pthread_mutex_unlock(&shared->index_lock);
-          search_diag_log("STAT FATAL-ish (errno=%d) on: %s", e, child);
-          if(shared->root_errors >= BFPILOT_SEARCH_ROOT_ERR_ABORT) {
-            pthread_mutex_lock(&q->lock);
-            shared->rc = -1;
-            shared->saved_errno = e;
-            snprintf(shared->error, sizeof(shared->error),
-                     "too many fatal FS errors under root");
-            pthread_cond_broadcast(&q->cond);
-            pthread_mutex_unlock(&q->lock);
-            break;
-          }
-        } else {
-          pthread_mutex_lock(&shared->index_lock);
-          idx->errors++;
-          pthread_mutex_unlock(&shared->index_lock);
-        }
-        continue;
-      }
-
-      /* Record mountpoint names but do not cross devices (XDEV). */
-      if(shared->same_device && S_ISDIR(st.st_mode) && st.st_dev != shared->root_dev) {
-        pthread_mutex_lock(&shared->index_lock);
-        shared->mount_skips++;
-        idx->skipped++;
-        /* Still index the mount directory entry itself for discoverability. */
-        (void)search_index_add(idx, child, &st);
-        pthread_mutex_unlock(&shared->index_lock);
-        continue;
-      }
-
-      pthread_mutex_lock(&shared->index_lock);
-      int add_rc = search_index_add(idx, child, &st);
-      if(add_rc < 0) {
-        pthread_mutex_lock(&q->lock);
-        shared->rc = -1;
-        shared->saved_errno = ENOMEM;
-        snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
-        pthread_cond_broadcast(&q->cond);
-        pthread_mutex_unlock(&q->lock);
-        pthread_mutex_unlock(&shared->index_lock);
-        break;
-      }
-
-      if(S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
-        if(!idx->truncated) {
-          int vis = visited_set_add(shared->visited, st.st_dev, st.st_ino);
-          if(vis > 0) {
-            char *copy = search_strdup(child);
-            if(!copy) {
-              pthread_mutex_lock(&q->lock);
-              shared->rc = -1;
-              shared->saved_errno = ENOMEM;
-              snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
-              pthread_cond_broadcast(&q->cond);
-              pthread_mutex_unlock(&q->lock);
-              pthread_mutex_unlock(&shared->index_lock);
-              break;
-            }
-            pthread_mutex_lock(&q->lock);
-            if(q->count >= q->cap) {
-              size_t next = q->cap ? q->cap * 2 : 256;
-              char **items = (char **)realloc(q->dirs, next * sizeof(*items));
-              if(items) {
-                q->dirs = items;
-                q->cap = next;
-              } else {
-                free(copy);
-                shared->rc = -1;
-                shared->saved_errno = ENOMEM;
-                snprintf(shared->error, sizeof(shared->error), "%s", "out of memory");
-                pthread_cond_broadcast(&q->cond);
-                pthread_mutex_unlock(&q->lock);
-                pthread_mutex_unlock(&shared->index_lock);
-                break;
-              }
-            }
-            q->dirs[q->count++] = copy;
-            pthread_cond_signal(&q->cond);
-            pthread_mutex_unlock(&q->lock);
-          } else if(vis == 0) {
-            /* already visited */
-          } else {
-            pthread_mutex_lock(&q->lock);
-            shared->rc = -1;
-            shared->saved_errno = ENOMEM;
-            snprintf(shared->error, sizeof(shared->error),
-                     "%s", "visited-set out of memory");
-            pthread_cond_broadcast(&q->cond);
-            pthread_mutex_unlock(&q->lock);
-            pthread_mutex_unlock(&shared->index_lock);
-            break;
-          }
-        }
-      }
-
-      if((idx->count % BFPILOT_SEARCH_PROGRESS_INTERVAL) == 0) {
-        publish_progress(idx, child, NULL, 0);
-      }
-      is_truncated = idx->truncated;
-      pthread_mutex_unlock(&shared->index_lock);
-
-      if(is_truncated) break;
-    }
-
-    closedir(dir);
-    free(dir_path);
-
-    pthread_mutex_lock(&shared->index_lock);
-    if(read_errno != 0) {
-      search_diag_log("READDIR ERROR (errno=%d) during crawl", read_errno);
-      shared->saved_errno = read_errno;
-      idx->errors++;
-    }
-    pthread_mutex_unlock(&shared->index_lock);
-
-    pthread_mutex_lock(&q->lock);
-    q->active_workers--;
-    if(q->active_workers == 0) {
-      pthread_cond_broadcast(&q->cond);
-    }
-    pthread_mutex_unlock(&q->lock);
-
-    if(shared->rc != 0 || is_truncated) break;
+static int
+crawl_queue_push(char ***dirs, size_t *count, size_t *cap, const char *path) {
+  if(*count >= *cap) {
+    size_t next = *cap ? (*cap * 2) : 256;
+    char **items = (char **)realloc(*dirs, next * sizeof(*items));
+    if(!items) return -1;
+    *dirs = items;
+    *cap = next;
   }
-  return NULL;
+  char *copy = search_strdup(path);
+  if(!copy) return -1;
+  (*dirs)[(*count)++] = copy;
+  return 0;
 }
 
 static int
 crawl_one_root(search_index_t *idx, const char *root, char *error,
                size_t error_sz, int *saved_errno, int system_mode,
-               visited_set_t *visited) {
+               visited_set_t *visited, int same_device) {
+  (void)system_mode;
   struct stat root_st;
   if(lstat(root, &root_st) != 0) {
     *saved_errno = errno;
@@ -1184,7 +971,7 @@ crawl_one_root(search_index_t *idx, const char *root, char *error,
     return -1;
   }
 
-  /* If another root already covered this mount (same dev+ino), skip. */
+  /* Already covered (same mount identity) — skip re-walk. */
   int vis = visited_set_add(visited, root_st.st_dev, root_st.st_ino);
   if(vis == 0) {
     search_diag_log("ROOT SKIP (already covered): %s", root);
@@ -1196,84 +983,139 @@ crawl_one_root(search_index_t *idx, const char *root, char *error,
     return -1;
   }
 
-  int root_add_rc = search_index_add(idx, root, &root_st);
-  if(root_add_rc < 0) {
+  if(search_index_add(idx, root, &root_st) < 0) {
     *saved_errno = ENOMEM;
     snprintf(error, error_sz, "%s", "out of memory");
     return -1;
   }
   if(idx->truncated) return 0;
 
-  crawl_shared_t shared = {0};
-  shared.idx = idx;
-  shared.visited = visited;
-  shared.root_dev = root_st.st_dev;
-  shared.system_mode = system_mode;
-  shared.same_device = 1; /* always XDEV: separate mounts are separate roots */
-  pthread_mutex_init(&shared.index_lock, NULL);
-  pthread_mutex_init(&shared.queue.lock, NULL);
-  pthread_cond_init(&shared.queue.cond, NULL);
+  const dev_t root_dev = root_st.st_dev;
+  char **dirs = NULL;
+  size_t count = 0, cap = 0, head = 0;
+  unsigned long root_errors = 0;
 
-  char *root_copy = search_strdup(root);
-  if(!root_copy) {
+  if(crawl_queue_push(&dirs, &count, &cap, root) != 0) {
     *saved_errno = ENOMEM;
     snprintf(error, error_sz, "%s", "out of memory");
     return -1;
   }
 
-  shared.queue.dirs = malloc(256 * sizeof(char *));
-  if(!shared.queue.dirs) {
-    free(root_copy);
-    *saved_errno = ENOMEM;
-    snprintf(error, error_sz, "%s", "out of memory");
-    return -1;
-  }
-  shared.queue.cap = 256;
-  shared.queue.dirs[shared.queue.count++] = root_copy;
-
-  pthread_t threads[BFPILOT_SEARCH_WORKER_THREADS];
-  int thread_count = 0;
-  for(int i = 0; i < BFPILOT_SEARCH_WORKER_THREADS; i++) {
-    if(pthread_create(&threads[i], NULL, crawler_thread_func, &shared) == 0) {
-      thread_count++;
+  while(head < count && !search_cancelled() && !idx->truncated) {
+    char *dir_path = dirs[head++];
+    DIR *dir = opendir(dir_path);
+    if(!dir) {
+      idx->errors++;
+      free(dir_path);
+      continue;
     }
-  }
 
-  if(thread_count == 0) {
-    free(root_copy);
-    free(shared.queue.dirs);
-    *saved_errno = EAGAIN;
-    snprintf(error, error_sz, "%s", "failed to create threads");
-    return -1;
-  }
-
-  pthread_mutex_lock(&shared.queue.lock);
-  shared.queue.done_pushing = 1;
-  while(shared.queue.head < shared.queue.count || shared.queue.active_workers > 0) {
-    if(search_cancelled() || shared.rc != 0 || idx->truncated) {
-      break;
+    idx->dirs_scanned++;
+    if((idx->dirs_scanned % BFPILOT_SEARCH_PROGRESS_INTERVAL) == 0) {
+      publish_progress(idx, dir_path, NULL, 0);
     }
-    pthread_cond_wait(&shared.queue.cond, &shared.queue.lock);
-  }
-  pthread_cond_broadcast(&shared.queue.cond);
-  pthread_mutex_unlock(&shared.queue.lock);
 
-  for(int i=0; i<thread_count; i++) {
-    pthread_join(threads[i], NULL);
+    struct dirent *ent;
+    for(;;) {
+      errno = 0;
+      ent = readdir(dir);
+      if(!ent) {
+        if(errno != 0) idx->errors++;
+        break;
+      }
+      if(!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+      if(search_cancelled()) break;
+
+      char child[1024];
+      if(strlen(dir_path) + strlen(ent->d_name) + 2 >= sizeof(child)) {
+        idx->skipped++;
+        continue;
+      }
+      join_path(child, sizeof(child), dir_path, ent->d_name);
+
+      if(search_skip_system_path(child)) {
+        idx->skipped++;
+        continue;
+      }
+
+      struct stat st = {0};
+      if(lstat(child, &st) != 0) {
+        int e = errno;
+        idx->errors++;
+        if(e == EIO || e == ESTALE || e == EFAULT || e == EBADF) {
+          root_errors++;
+          if(root_errors >= BFPILOT_SEARCH_ROOT_ERR_ABORT) {
+            *saved_errno = e;
+            snprintf(error, error_sz, "too many fatal FS errors under root");
+            closedir(dir);
+            free(dir_path);
+            for(size_t i = head; i < count; i++) free(dirs[i]);
+            free(dirs);
+            return -1;
+          }
+        }
+        continue;
+      }
+
+      /* XDEV fence: stay on this root's mount. Completeness for Index All
+       * comes from multi-root collection (each mount is its own root) + a
+       * shared visited set — not from blind cross-mount walks that re-enter
+       * nullfs aliases and risk volatile mounts. */
+      if(same_device && S_ISDIR(st.st_mode) && st.st_dev != root_dev) {
+        idx->skipped++;
+        (void)search_index_add(idx, child, &st);
+        continue;
+      }
+
+      if(search_index_add(idx, child, &st) < 0) {
+        *saved_errno = ENOMEM;
+        snprintf(error, error_sz, "%s", "out of memory");
+        closedir(dir);
+        free(dir_path);
+        for(size_t i = head; i < count; i++) free(dirs[i]);
+        free(dirs);
+        return -1;
+      }
+
+      if(S_ISDIR(st.st_mode) && !idx->truncated) {
+        int v = visited_set_add(visited, st.st_dev, st.st_ino);
+        if(v > 0) {
+          if(crawl_queue_push(&dirs, &count, &cap, child) != 0) {
+            *saved_errno = ENOMEM;
+            snprintf(error, error_sz, "%s", "out of memory");
+            closedir(dir);
+            free(dir_path);
+            for(size_t i = head; i < count; i++) free(dirs[i]);
+            free(dirs);
+            return -1;
+          }
+        } else if(v < 0) {
+          *saved_errno = ENOMEM;
+          snprintf(error, error_sz, "%s", "visited-set out of memory");
+          closedir(dir);
+          free(dir_path);
+          for(size_t i = head; i < count; i++) free(dirs[i]);
+          free(dirs);
+          return -1;
+        }
+      }
+
+      if((idx->count % BFPILOT_SEARCH_PROGRESS_INTERVAL) == 0) {
+        publish_progress(idx, child, NULL, 0);
+      }
+    }
+
+    closedir(dir);
+    free(dir_path);
   }
 
-  for(size_t i = shared.queue.head; i < shared.queue.count; i++) {
-    free(shared.queue.dirs[i]);
-  }
-  free(shared.queue.dirs);
-  pthread_mutex_destroy(&shared.queue.lock);
-  pthread_cond_destroy(&shared.queue.cond);
-  pthread_mutex_destroy(&shared.index_lock);
+  for(size_t i = head; i < count; i++) free(dirs[i]);
+  free(dirs);
 
-  if(shared.rc != 0) {
-    *saved_errno = shared.saved_errno;
-    snprintf(error, error_sz, "%s", shared.error);
-    return shared.rc;
+  if(search_cancelled()) {
+    *saved_errno = ECANCELED;
+    snprintf(error, error_sz, "%s", "cancelled");
+    return -1;
   }
 
   publish_progress(idx, root, NULL, 0);
@@ -1291,6 +1133,9 @@ search_worker(void *arg) {
   snprintf(requested_root, sizeof(requested_root), "%s", a->root);
   free(a);
 
+  /* Let the accept/rebuild HTTP response finish before heavy FS work. */
+  usleep(100000);
+
   (void)setpriority(PRIO_PROCESS, 0, BFPILOT_SEARCH_CRAWL_NICE);
 
   search_index_t *idx = calloc(1, sizeof(*idx));
@@ -1299,21 +1144,30 @@ search_worker(void *arg) {
     return NULL;
   }
 
-  char roots[BFPILOT_SEARCH_MAX_ROOTS][1024];
+  /* Heap, not stack: BFPILOT_SEARCH_MAX_ROOTS * 1024 ≈ 64KiB overflows typical
+   * PS5 pthread stacks and was killing the process right after rebuild accept. */
+  char (*roots)[1024] = calloc((size_t)BFPILOT_SEARCH_MAX_ROOTS, 1024);
+  if(!roots) {
+    finish_build(idx, -1, "out of memory", ENOMEM, start_generation);
+    return NULL;
+  }
+
   int root_count = 0;
-  if(system) {
-    root_count = collect_system_roots(roots);
-    snprintf(idx->root, sizeof(idx->root), "%s",
-             BFPILOT_SEARCH_SYSTEM_ROOT_LABEL);
-  } else if(global) {
+  /* Index All: multi-root discovery + ONE shared visited set (no double-count).
+   * Cross-mount walk from each root (same_device=0 for global) recovers full
+   * coverage; visited(dev,ino) stops re-walking aliases. */
+  if(system || global) {
     root_count = collect_global_roots(roots);
-    snprintf(idx->root, sizeof(idx->root), "%s", BFPILOT_SEARCH_ALL_ROOTS_LABEL);
+    snprintf(idx->root, sizeof(idx->root), "%s",
+             system ? BFPILOT_SEARCH_SYSTEM_ROOT_LABEL
+                    : BFPILOT_SEARCH_ALL_ROOTS_LABEL);
   } else {
     snprintf(roots[root_count++], sizeof(roots[0]), "%s", requested_root);
     snprintf(idx->root, sizeof(idx->root), "%s", requested_root);
   }
 
   if(root_count <= 0) {
+    free(roots);
     finish_build(idx, -1, "no searchable roots found", ENOENT,
                  start_generation);
     return NULL;
@@ -1334,8 +1188,12 @@ search_worker(void *arg) {
   for(int i = 0; i < root_count && !search_cancelled() && !idx->truncated && !fatal; i++) {
     publish_progress(idx, roots[i], NULL, 0);
     search_diag_log("ROOT CRAWL start: %s", roots[i]);
+    /* Always same-device per root. Index All completeness = multi-root list
+     * (/, /data, /user, usb/ext, system_*, …) + shared visited(dev,ino).
+     * Cross-mount walks re-hit aliases and caused thrash/hang risk under P2JB. */
+    int same_device = 1;
     int root_rc = crawl_one_root(idx, roots[i], error, sizeof(error), &saved_errno,
-                                 system || global, &visited);
+                                 system || global, &visited, same_device);
     if(root_rc == 0) {
       roots_succeeded++;
       append_root_csv(roots_ok, sizeof(roots_ok), roots[i]);
@@ -1401,6 +1259,8 @@ search_worker(void *arg) {
 
   search_diag_log("ROOT CRAWL summary ok=%d fail=%d entries=%zu",
                   roots_succeeded, roots_failed, idx->count);
+
+  free(roots);
 
   publish_progress(idx, NULL, error[0] ? error : NULL, saved_errno);
   finish_build(idx, rc, error, saved_errno, start_generation);
@@ -1604,6 +1464,8 @@ rebuild_request(const http_request_t *req) {
   pthread_attr_t at;
   pthread_attr_init(&at);
   pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+  /* Generous stack: PS5 defaults are tight; crawl locals + libc need room. */
+  (void)pthread_attr_setstacksize(&at, 512 * 1024);
   int trc = pthread_create(&t, &at, search_worker, arg);
   pthread_attr_destroy(&at);
   if(trc != 0) {
@@ -1616,11 +1478,8 @@ rebuild_request(const http_request_t *req) {
     return serve_error(req, 500, "could not start search rebuild");
   }
 
-  bfpilot_log("search rebuild start root=%s global=%d system=%d "
-              "max_entries=%lu nice=%d",
-              root, global, system,
-              (unsigned long)BFPILOT_SEARCH_MAX_ENTRIES,
-              BFPILOT_SEARCH_CRAWL_NICE);
+  bfpilot_log("search rebuild start root=%s global=%d system=%d",
+              root, global, system);
   return status_request(req);
 }
 
@@ -1835,10 +1694,12 @@ bfpilot_search_shutdown(void) {
 
 int
 bfpilot_search_request(const http_request_t *req, const char *url) {
-  /* Load disk cache without holding the search lock (avoid blocking HTTP). */
+  int is_rebuild = url && !strcmp(url, "/api/fs/search/rebuild");
+  /* Load disk cache without holding the search lock (avoid blocking HTTP).
+   * Skip on rebuild — we are about to replace the index anyway. */
   int need_load = 0;
   pthread_mutex_lock(&g_search.lock);
-  if(!g_search.index && !g_search.running) need_load = 1;
+  if(!is_rebuild && !g_search.index && !g_search.running) need_load = 1;
   pthread_mutex_unlock(&g_search.lock);
   if(need_load) {
     search_index_t *idx = search_load_index();
@@ -1857,7 +1718,7 @@ bfpilot_search_request(const http_request_t *req, const char *url) {
   }
 
   if(!strcmp(url, "/api/fs/search/status")) return status_request(req);
-  if(!strcmp(url, "/api/fs/search/rebuild")) return rebuild_request(req);
+  if(is_rebuild) return rebuild_request(req);
   if(!strcmp(url, "/api/fs/search/cancel")) return cancel_request(req);
   if(!strcmp(url, "/api/fs/search")) return query_request(req);
   return serve_error(req, 404, "no such search endpoint");

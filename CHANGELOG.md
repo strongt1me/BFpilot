@@ -1,15 +1,22 @@
+﻿## v0.3.9 Test Build
+
+* **Web upload**: zftpd/ftpsrv single-buffer STOR path (1 MiB recv→write); no multi-GB `posix_fallocate` while body streams; no bulk `TCP_NODELAY`; listen `SO_RCVBUF` 4 MiB. Server reports `averageMBps` / `recvMs` / `writeMs`.
+* **Index All**: multi-root crawl with shared visited `(st_dev,st_ino)` (dev-0 safe), per-root XDEV, expanded roots, soft-fail roots, rate logs.
+* **Copy/move**: free-space preflight after size scan; overwrite unlink errno fix; large sequential buffers; fatal FS abort.
+* **Build**: `ENABLE_ARCHIVE=0` / `bfpilot-lite` for slim ELF without integrated unrar/7z/miniz.
+* **Verify**: `scripts/goal_verify_io.py` structural gates for upload/index/copy.
 # BFpilot Optimization Changelog
 
 This document outlines the modifications, optimizations, and new features introduced in this optimized version of **BFpilot** compared to the original payload.
 
-## v0.3.9 — Index All stability & coverage (2026-07-12)
+## v0.3.9 â€” Index All stability & coverage (2026-07-12)
 
 ### Search / Index All
 
 * **Priority multi-root crawl** for useful storage first: `/data`, `/user` (+ important subtrees), `/mnt/usb*`, `/mnt/ext*`, then system mounts, then `/`.
-* **Same-device (XDEV) fencing** — record mountpoint directories but do not descend across `st_dev` (avoids nullfs/sandbox recursion and KP risk under P2JB/Y2JB).
+* **Same-device (XDEV) fencing** â€” record mountpoint directories but do not descend across `st_dev` (avoids nullfs/sandbox recursion and KP risk under P2JB/Y2JB).
 * **Never full-crawl** `/mnt`, `/system_tmp`, `/update`, `/mnt/sandbox`, `/mnt/shadowmnt`, or pseudo FS roots.
-* **Soft-fail per root** — one bad mount no longer aborts the entire Index All or discards a partial index.
+* **Soft-fail per root** â€” one bad mount no longer aborts the entire Index All or discards a partial index.
 * **Visited-set fix** for filesystems that report `st_dev == 0` (broken empty-slot logic).
 * **Always `lstat`** so search results keep real sizes/mtimes (removed DT_REG zero-size shortcut).
 * **4 crawl workers** (was 8) for calmer FS load on 11.60 + P2JB.
@@ -19,7 +26,7 @@ Hardware notes: validated root discovery + pre-fix ~18k-entry index on FW 11.60 
 
 ---
 
-## v0.3.8 — Test Build Clean (2026-07-12)
+## v0.3.8 â€” Test Build Clean (2026-07-12)
 
 ### New Features
 
@@ -37,15 +44,15 @@ Hardware notes: validated root discovery + pre-fix ~18k-entry index on FW 11.60 
 
 * **Interactive Image Viewer** (`assets/files.html`):
   * Built-in image viewer for all major formats: `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`, `.ico`, `.svg`.
-  * Supports grab-and-drag panning, mouse-wheel zooming (0.1× – 10×), 90° rotation, and a reset button.
+  * Supports grab-and-drag panning, mouse-wheel zooming (0.1Ã— â€“ 10Ã—), 90Â° rotation, and a reset button.
   * Escape key closes the viewer; double-clicking an image row opens it directly.
-  * The toolbar View/Edit button dynamically switches label based on selection (image → "View", text file → "Edit").
+  * The toolbar View/Edit button dynamically switches label based on selection (image â†’ "View", text file â†’ "Edit").
 
 * **Multi-Log Viewer with PS5 Error History Decoder** (`assets/files.html`):
   * The log button now shows a dropdown selector with prioritized log sources:
     * Bfpilot server log, Archive extractor log, Search crawler log, Boot log.
     * PS5 VSH system log.
-    * PS5 Error History — crawls `/system_data/priv/error/history/`, decodes the JSON crash records (error codes, Title IDs, firmware version, ticks), and displays them as a readable trace list.
+    * PS5 Error History â€” crawls `/system_data/priv/error/history/`, decodes the JSON crash records (error codes, Title IDs, firmware version, ticks), and displays them as a readable trace list.
   * Auto-refreshes every 2 seconds while the overlay is open.
 
 ### Improvements
@@ -57,13 +64,13 @@ Hardware notes: validated root discovery + pre-fix ~18k-entry index on FW 11.60 
 
 ---
 
-## v0.3.5 — Test Build 10 Clean (2026-07-05)
+## v0.3.5 â€” Test Build 10 Clean (2026-07-05)
 
 ### Key Features
 
 * **Graceful Exit & Re-injection**: Loopback TCP wakeup, clean background thread shutdown, instant port release.
 * **Fast Multi-Threaded Search Indexing**: Work-stealing concurrent crawler thread pool, 0ms query resolution.
-* **Integrated Archive Extraction**: RAR, 7z (including split `.7z.001`), ZIP — all extracted inside the main ELF.
+* **Integrated Archive Extraction**: RAR, 7z (including split `.7z.001`), ZIP â€” all extracted inside the main ELF.
 * **Premium Web UI & Virtual Scrolling**: Row-recycling virtual scroller prevents OOM on 10,000+ file directories.
 * **Storage & Network Optimizations**: FreeBSD `sendfile`, 2 MB socket buffers, `TCP_NODELAY`.
 
@@ -106,3 +113,4 @@ Hardware notes: validated root discovery + pre-fix ~18k-entry index on FW 11.60 
 * **Changes:**
   * Replaced the Unix-only `xxd` shell pipeline with a custom Python script (`gen-asset-module.py`) to compile `files.html` into a C header `files_html.h`.
   * Cleaned up the Makefile to allow standard building on Windows using Git Bash or command-line make.
+

@@ -732,6 +732,28 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
   setsockopt(srvfd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
 #endif
 
+  /*
+   * SO_RCVBUF on the LISTENING socket (before bind/listen).
+   * On FreeBSD/Orbis the accepted socket inherits this; post-accept
+   * setsockopt(SO_RCVBUF) is often silently capped to ~256–512 KB, which is
+   * too small to absorb PFS write latency during large uploads (zftpd).
+   * Leave SO_SNDBUF to kernel auto-tune (downloads).
+   */
+  {
+    int rcvbuf = 4 * 1024 * 1024;
+    if(setsockopt(srvfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) != 0) {
+      bfpilot_log("setsockopt SO_RCVBUF listen port %u failed errno=%d",
+                  (unsigned int)port, errno);
+    } else {
+      int got = 0;
+      socklen_t gl = sizeof(got);
+      if(getsockopt(srvfd, SOL_SOCKET, SO_RCVBUF, &got, &gl) == 0) {
+        bfpilot_log("listen SO_RCVBUF requested=%d effective=%d port=%u",
+                    rcvbuf, got, (unsigned int)port);
+      }
+    }
+  }
+
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -799,11 +821,16 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
       bfpilot_diag_set_log_udp_target(inet_ntoa(client_addr.sin_addr), 5906);
     }
 
-    int bufsize = 2 * 1024 * 1024;
-    setsockopt(connfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-    setsockopt(connfd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    int flag = 1;
-    setsockopt(connfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    /*
+     * zftpd: SO_RCVBUF is set on the *listen* socket (above); post-accept
+     * setsockopt is often silently capped on Orbis. Still request 4 MiB so
+     * firmwares that honor it (ftpsrv-style) get a larger data window.
+     * Never TCP_NODELAY on bulk HTTP — tiny segments thrash PFS writes.
+     */
+    {
+      int rcvbuf = 4 * 1024 * 1024;
+      (void)setsockopt(connfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    }
 
     client_arg_t *client = calloc(1, sizeof(*client));
     if(!client) {

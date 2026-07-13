@@ -19,6 +19,9 @@ endif
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
 PYTHON ?= python3
+# Production HTTP listen port (file manager UI). Override only for local tests:
+#   mingw32-make bfpilot WEB_PORT=5910
+# Ship / daily use must stay 5905.
 WEB_PORT ?= 5905
 
 VERSION_TAG := bfpilot-v0.3.1-test7-search
@@ -127,6 +130,10 @@ COMMON_CFLAGS += -DVERSION_TAG=\"$(VERSION_TAG)\"
 COMMON_CFLAGS += -DBUILD_VERSION=\"$(BUILD_VERSION)\"
 COMMON_CFLAGS += -DBFPILOT_SDK_PATH=\"$(PS5_PAYLOAD_SDK)\"
 
+# Integrated RAR/7z/ZIP extract (~1.2+ MiB of unrar+7z+miniz). Set 0 for lite ELF:
+#   mingw32-make bfpilot ENABLE_ARCHIVE=0
+ENABLE_ARCHIVE ?= 1
+
 BFPILOT_CFLAGS := $(COMMON_CFLAGS)
 BFPILOT_CFLAGS += -DBFPILOT_PAYLOAD_NAME=\"bfpilot\"
 BFPILOT_CFLAGS += -DBFPILOT_BUILD_MODE=\"file-manager\"
@@ -134,7 +141,13 @@ BFPILOT_CFLAGS += -DBFPILOT_WEB_PORT=$(WEB_PORT)
 BFPILOT_CFLAGS += -DBFPILOT_DEBUG_NOTIFICATIONS=0
 BFPILOT_CFLAGS += -DBFPILOT_ENABLE_LAUNCHER=0
 BFPILOT_CFLAGS += -DBFPILOT_DISABLE_LAUNCHER=1
-BFPILOT_CFLAGS += -DBFPILOT_ENABLE_INTEGRATED_ARCHIVE=1
+BFPILOT_CFLAGS += -DBFPILOT_ENABLE_INTEGRATED_ARCHIVE=$(ENABLE_ARCHIVE)
+
+ifeq ($(ENABLE_ARCHIVE),1)
+BFPILOT_LINK_ARCHIVE_OBJS := $(BFPILOT_ARCHIVE_OBJS)
+else
+BFPILOT_LINK_ARCHIVE_OBJS :=
+endif
 
 LAUNCHER_INSTALLER_CFLAGS := $(COMMON_CFLAGS)
 LAUNCHER_INSTALLER_CFLAGS += -DBFPILOT_PAYLOAD_NAME=\"bfpilot-launcher-installer\"
@@ -252,8 +265,8 @@ build/bfpilot-archive/%.o: %.c Makefile
 	$(call run,$(CC_CMD) $(ARCHIVE_WORKER_CFLAGS) $(ARCHIVE_WORKER_DEFINES) $(ARCHIVE_SEVENZ_DEFINES) $(ARCHIVE_WORKER_INCLUDES) -DBFPILOT_ARCHIVE_INTEGRATED=1 -c $< -o $@)
 
 ifeq ($(HOST_IS_WINDOWS),1)
-$(BFPILOT_BIN): $(BFPILOT_OBJS) $(BFPILOT_ARCHIVE_OBJS)
-	$(file >build/bfpilot-link.rsp,$(BFPILOT_OBJS) $(BFPILOT_ARCHIVE_OBJS))
+$(BFPILOT_BIN): $(BFPILOT_OBJS) $(if $(filter 1,$(ENABLE_ARCHIVE)),$(BFPILOT_ARCHIVE_OBJS))
+	$(file >build/bfpilot-link.rsp,$(BFPILOT_OBJS) $(BFPILOT_LINK_ARCHIVE_OBJS))
 	$(call run,$(WINDOWS_CXX_LD_CMD) -o $@ $(WINDOWS_CXX_LINK_PREFIX) @build/bfpilot-link.rsp $(WINDOWS_CXX_LINK_SUFFIX))
 	$(call run,$(STRIP_CMD) --strip-all $@)
 	$(call run,$(PYTHON) scripts/scrub_main_payload.py $@)
@@ -267,8 +280,8 @@ $(ARCHIVE_WORKER_BIN): $(ARCHIVE_WORKER_OBJS)
 	$(call run,$(WINDOWS_CXX_LD_CMD) -o $@ $(WINDOWS_CXX_LINK_PREFIX) @build/archive-worker-link.rsp $(WINDOWS_CXX_LINK_SUFFIX))
 	$(call run,$(STRIP_CMD) --strip-all $@)
 else
-$(BFPILOT_BIN): $(BFPILOT_OBJS) $(BFPILOT_ARCHIVE_OBJS)
-	$(call run,$(CXX_CMD) $(COMMON_LDFLAGS) -o $@ $(BFPILOT_OBJS) $(BFPILOT_ARCHIVE_OBJS) $(ARCHIVE_WORKER_LDFLAGS))
+$(BFPILOT_BIN): $(BFPILOT_OBJS) $(if $(filter 1,$(ENABLE_ARCHIVE)),$(BFPILOT_ARCHIVE_OBJS))
+	$(call run,$(CXX_CMD) $(COMMON_LDFLAGS) -o $@ $(BFPILOT_OBJS) $(BFPILOT_LINK_ARCHIVE_OBJS) $(ARCHIVE_WORKER_LDFLAGS))
 	$(call run,$(STRIP_CMD) --strip-all $@)
 	$(call run,$(PYTHON) scripts/scrub_main_payload.py $@)
 
@@ -280,6 +293,10 @@ $(ARCHIVE_WORKER_BIN): $(ARCHIVE_WORKER_OBJS)
 	$(call run,$(CXX_CMD) -o $@ $(ARCHIVE_WORKER_OBJS) $(ARCHIVE_WORKER_LDFLAGS))
 	$(call run,$(STRIP_CMD) --strip-all $@)
 endif
+
+# Lite file-manager only (no integrated unrar/7z/miniz) — near historical ~200 KiB class.
+bfpilot-lite:
+	$(MAKE) bfpilot ENABLE_ARCHIVE=0 BUILD_VERSION=$(BUILD_VERSION)-lite
 
 inspect-imports: all
 	$(call run,bash scripts/inspect_imports.sh $(BFPILOT_BIN) $(LAUNCHER_INSTALLER_BIN) $(ARCHIVE_WORKER_BIN))
@@ -306,4 +323,4 @@ clean:
 	$(call run,rm -rf $(BFPILOT_BIN) $(LAUNCHER_INSTALLER_BIN) $(ARCHIVE_WORKER_BIN) build gen)
 
 .SECONDARY: $(GEN_SRCS)
-.PHONY: all bfpilot launcher-installer archive-worker inspect-imports clean deploy-bfpilot deploy-launcher-installer ps5-diag ps5-smoke ps5-storage-audit ps5-archive-perf
+.PHONY: all bfpilot bfpilot-lite launcher-installer archive-worker inspect-imports clean deploy-bfpilot deploy-launcher-installer ps5-diag ps5-smoke ps5-storage-audit ps5-archive-perf

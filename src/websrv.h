@@ -9,6 +9,7 @@
 
 typedef struct http_request {
   int  fd;
+  int  keep_alive; /* 1 = prefer Connection: keep-alive for this response */
   char method[8];
   char path[1024];
   char query[2048];
@@ -34,6 +35,10 @@ typedef struct bfpilot_launcher_diag {
 
 
 int websrv_write_all(int fd, const void *data, size_t size);
+
+/* Thread-local: set before send_headers so responses can keep the TCP session. */
+void websrv_conn_set_keep_alive(int on);
+int  websrv_conn_get_keep_alive(void);
 
 int websrv_send_headers(int fd, int status, const char *mime,
                         size_t size, const char *extra);

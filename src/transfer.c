@@ -31,11 +31,15 @@
 #endif
 
 /*
- * Upload buffer — zftpd FTP_STREAM_BUFFER_SIZE on PS5 / ftpsrv IO_COPY_BUFSIZE.
- * Single-buffer STOR only (no double-buffer writer on PS4/PS5 — zftpd docs).
+ * Upload buffer — single-buffer STOR only (no double-buffer writer on PS4/PS5;
+ * zftpd/ftpsrv lessons: double-buffer + small RCVBUF stalls TCP).
+ *
+ * 2 MiB (was 1 MiB): fewer write()s into PFS crypto on write-bound firmwares
+ * while keeping the same recv→write cadence that reopens the TCP window after
+ * each disk write. Still far below multi-GB fallocate stalls.
  */
 #ifndef BFPILOT_UPLOAD_BUF_SIZE
-#define BFPILOT_UPLOAD_BUF_SIZE (1 * 1024 * 1024)
+#define BFPILOT_UPLOAD_BUF_SIZE (2 * 1024 * 1024)
 #endif
 
 #define COPY_BUF_SIZE   BFPILOT_TRANSFER_BUF_SIZE
@@ -2576,7 +2580,8 @@ transfer_upload_request(const http_request_t *req, const char *initial_data,
                   ",\"size\":%lu,\"elapsedMs\":%ld,\"averageMBps\":%.2f,"
                   "\"recvMs\":%ld,\"writeMs\":%ld,"
                   "\"destinationDev\":%lu,\"bufSize\":%u,"
-                  "\"pathStyle\":\"zftpd-single-buffer-stor\"}",
+                  "\"pathStyle\":\"zftpd-single-buffer-stor-2m\","
+                  "\"keepAliveHint\":true}",
                   (unsigned long)bytes, elapsed_ms, mbps, recv_ms, write_ms,
                   destination_dev, (unsigned int)UPLOAD_BUF_SIZE) != 0) {
     free(b.data);

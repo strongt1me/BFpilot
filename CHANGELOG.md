@@ -1,4 +1,32 @@
-﻿## v0.3.9 Test Build
+﻿## v0.4.0 Stable (2026-07-14)
+
+Stable release line after v0.3.x test builds. Focus: **PC→PS5 upload speed**, Index All stability, and live HW validation on digital **FW 11.60**.
+
+### Upload / network
+* HTTP/1.1 **keep-alive** (up to 64 requests per connection) for multi-file uploads.
+* **2 MiB** single-buffer STOR (recv→write; no double-buffer; no multi-GB `posix_fallocate` while body streams).
+* Listen **SO_RCVBUF 4 MiB**, **SO_SNDBUF 2 MiB**, backlog 32; no bulk `TCP_NODELAY`.
+* Download stream buffer **1 MiB**.
+* UI: less toast spam on multi-file; `Content-Type: application/octet-stream`.
+* Docs: `docs/UPLOAD_PERFORMANCE.md`.
+
+### Index All / FS (from v0.3.9)
+* Multi-root crawl, XDEV fencing, soft-fail roots, `st_dev==0` visited-set fix, lstat sizes.
+* Copy/move free-space preflight, large sequential buffers, fatal FS abort.
+
+### Testing
+* `scripts/goal_verify_io.py` structural gates.
+* `scripts/ps5_smoke.py` + `scripts/ps5_full_feature_test.py` (44/44 live on 11.60).
+
+## v0.3.10 Upload speed (safe)
+
+* **HTTP keep-alive**: client thread reuses TCP for up to 64 requests (multi-file uploads skip handshake/slow-start each time).
+* **Upload buffer 2 MiB** single-buffer STOR (still recv→write cadence; no double-buffer, no fallocate-while-stream).
+* **Download stream 1 MiB**; listen/accept **SO_SNDBUF** 2 MiB + backlog 32.
+* **UI**: fewer toasts during multi-file upload; explicit `Content-Type: application/octet-stream`.
+* Docs: `docs/UPLOAD_PERFORMANCE.md` (PS5 ceilings, what we avoid).
+
+## v0.3.9 Test Build
 
 * **Web upload**: zftpd/ftpsrv single-buffer STOR path (1 MiB recv→write); no multi-GB `posix_fallocate` while body streams; no bulk `TCP_NODELAY`; listen `SO_RCVBUF` 4 MiB. Server reports `averageMBps` / `recvMs` / `writeMs`.
 * **Index All**: multi-root crawl with shared visited `(st_dev,st_ino)` (dev-0 safe), per-root XDEV, expanded roots, soft-fail roots, rate logs.

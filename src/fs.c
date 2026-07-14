@@ -21,7 +21,11 @@
 #include "websrv.h"
 
 
-#define STREAM_BUF_SIZE (64 * 1024)
+/* Download path buffer — larger sequential reads reduce syscall/PFS overhead */
+#ifndef BFPILOT_STREAM_BUF_SIZE
+#define BFPILOT_STREAM_BUF_SIZE (1024 * 1024)
+#endif
+#define STREAM_BUF_SIZE BFPILOT_STREAM_BUF_SIZE
 
 
 typedef struct dynbuf {

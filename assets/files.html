@@ -2093,6 +2093,9 @@
 
         state.uploadXhr = xhr;
         xhr.open('POST', url);
+        /* Explicit body type; browser keep-alive reuses TCP with server keep-alive */
+        try { xhr.setRequestHeader('Content-Type', 'application/octet-stream'); } catch (e) {}
+        try { xhr.setRequestHeader('Connection', 'keep-alive'); } catch (e) {}
         xhr.upload.onprogress = (event) => {
           const loaded = Math.min(file.size, Number(event.loaded || 0));
           if (onProgress) onProgress(loaded);
@@ -2129,6 +2132,8 @@
       let uploadedBytes = 0;
       const totalBytes = files.reduce((sum, file) => sum + (file.size || 0), 0);
       const startedAt = Date.now();
+      /* Sequential single-stream: max LAN/PFS for one body; keep-alive cuts multi-file TCP setup cost.
+       * Avoid parallel writers to /data — PFS crypto often serializes and can slow bulk. */
 
       updateUploadJob(0, totalBytes, startedAt, 0, files.length, 'Preparing', failed, false);
 
@@ -2146,7 +2151,10 @@
           uploadedBytes += file.size || 0;
           updateUploadJob(uploadedBytes, totalBytes, startedAt,
             index, files.length, file.name, failed, false);
-          toast('Uploaded ' + ok + ' / ' + files.length, 'ok');
+          /* Toast only every 8 files or on last — PS5 browser UI thrash hurts multi-file speed */
+          if (ok === files.length || (ok % 8) === 0) {
+            toast('Uploaded ' + ok + ' / ' + files.length, 'ok');
+          }
         } catch (err) {
           if (state.uploadAbort || err.message === 'upload cancelled') {
             state.uploadAbort = true;

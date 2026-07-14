@@ -34,6 +34,21 @@
 #define BFPILOT_WEB_PORT 5905
 #endif
 
+/* Inherit large windows: Orbis often caps post-accept setsockopt. */
+#ifndef BFPILOT_LISTEN_RCVBUF
+#define BFPILOT_LISTEN_RCVBUF (4 * 1024 * 1024)
+#endif
+#ifndef BFPILOT_CONN_SNDBUF
+#define BFPILOT_CONN_SNDBUF (2 * 1024 * 1024)
+#endif
+#ifndef BFPILOT_HTTP_KEEPALIVE_MAX
+#define BFPILOT_HTTP_KEEPALIVE_MAX 64
+#endif
+#ifndef BFPILOT_LISTEN_BACKLOG
+#define BFPILOT_LISTEN_BACKLOG 32
+#endif
+
+static __thread int g_tls_keep_alive = 0;
 
 static int             g_websrv_srvfd = -1;
 static pthread_mutex_t g_websrv_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -126,13 +141,26 @@ websrv_write_all(int fd, const void *data, size_t size) {
 }
 
 
+void
+websrv_conn_set_keep_alive(int on) {
+  g_tls_keep_alive = on ? 1 : 0;
+}
+
+
+int
+websrv_conn_get_keep_alive(void) {
+  return g_tls_keep_alive ? 1 : 0;
+}
+
+
 int
 websrv_send_headers(int fd, int status, const char *mime, size_t size,
                     const char *extra) {
   char header[1024];
+  const char *conn = g_tls_keep_alive ? "keep-alive" : "close";
   int n = snprintf(header, sizeof(header),
                    "HTTP/1.1 %d %s\r\n"
-                   "Connection: close\r\n"
+                   "Connection: %s\r\n"
                    "Access-Control-Allow-Origin: *\r\n"
                    "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n"
                    "Pragma: no-cache\r\n"
@@ -142,6 +170,7 @@ websrv_send_headers(int fd, int status, const char *mime, size_t size,
                    "%s"
                    "\r\n",
                    status, status_text(status),
+                   conn,
                    mime ? mime : "application/octet-stream",
                    (unsigned long)size,
                    extra ? extra : "");
@@ -334,6 +363,28 @@ content_length_from_headers(const char *headers) {
     if(len == 0) break;
     if(len > 15 && !strncasecmp(line, "Content-Length:", 15)) {
       return (size_t)strtoull(line + 15, NULL, 10);
+    }
+    if(!next) break;
+    line = next + 2;
+  }
+  return 0;
+}
+
+
+/* HTTP/1.1 defaults to keep-alive unless client sends Connection: close. */
+static int
+client_wants_close(const char *headers) {
+  const char *line = strstr(headers, "\r\n");
+  if(!line) return 0;
+  line += 2;
+  while(*line) {
+    const char *next = strstr(line, "\r\n");
+    size_t len = next ? (size_t)(next - line) : strlen(line);
+    if(len == 0) break;
+    if(len > 11 && !strncasecmp(line, "Connection:", 11)) {
+      const char *v = line + 11;
+      while(*v == ' ' || *v == '\t') v++;
+      if(!strncasecmp(v, "close", 5)) return 1;
     }
     if(!next) break;
     line = next + 2;
@@ -632,7 +683,7 @@ client_thread(void *arg) {
   int fd = client->fd;
   char *buf = malloc(HEADER_MAX);
   size_t used = 0;
-  int header_end = -1;
+  int req_count = 0;
 
   free(client);
   if(!buf) {
@@ -640,57 +691,95 @@ client_thread(void *arg) {
     return NULL;
   }
 
-  while(used < HEADER_MAX) {
-    ssize_t n = recv(fd, buf + used, HEADER_MAX - used, 0);
-    if(n < 0) {
-      if(errno == EINTR) continue;
+  /*
+   * HTTP/1.1 keep-alive loop: multi-file PC→PS5 upload reuses one TCP
+   * session (saves handshake + slow-start per file). Cap request count so
+   * a sticky client cannot pin a worker forever.
+   */
+  while(!g_websrv_exit_requested && req_count < BFPILOT_HTTP_KEEPALIVE_MAX) {
+    int header_end = -1;
+
+    while(used < HEADER_MAX) {
+      header_end = find_header_end(buf, used);
+      if(header_end >= 0) break;
+      ssize_t n = recv(fd, buf + used, HEADER_MAX - used, 0);
+      if(n < 0) {
+        if(errno == EINTR) continue;
+        goto done;
+      }
+      if(n == 0) goto done;
+      used += (size_t)n;
+    }
+
+    if(header_end < 0) {
+      websrv_conn_set_keep_alive(0);
+      websrv_send_error_json(fd, 400, "bad request");
       goto done;
     }
-    if(n == 0) goto done;
-    used += (size_t)n;
-    header_end = find_header_end(buf, used);
-    if(header_end >= 0) break;
-  }
 
-  if(header_end < 0) {
-    websrv_send_error_json(fd, 400, "bad request");
-    goto done;
-  }
+    char first_body_byte = buf[header_end];
+    buf[header_end] = 0;
 
-  char first_body_byte = buf[header_end];
-  buf[header_end] = 0;
+    char method[8];
+    char target[2048];
+    if(sscanf(buf, "%7s %2047s", method, target) != 2) {
+      websrv_conn_set_keep_alive(0);
+      websrv_send_error_json(fd, 400, "bad request");
+      goto done;
+    }
 
-  char method[8];
-  char target[2048];
-  if(sscanf(buf, "%7s %2047s", method, target) != 2) {
-    websrv_send_error_json(fd, 400, "bad request");
-    goto done;
-  }
+    int want_close = client_wants_close(buf);
+    int keep = !want_close;
+    websrv_conn_set_keep_alive(keep);
 
-  http_request_t req;
-  memset(&req, 0, sizeof(req));
-  req.fd = fd;
-  snprintf(req.method, sizeof(req.method), "%s", method);
+    http_request_t req;
+    memset(&req, 0, sizeof(req));
+    req.fd = fd;
+    req.keep_alive = keep;
+    snprintf(req.method, sizeof(req.method), "%s", method);
 
-  char *query = strchr(target, '?');
-  if(query) {
-    *query++ = 0;
-    snprintf(req.query, sizeof(req.query), "%s", query);
-  }
-  websrv_url_decode(req.path, sizeof(req.path), target);
+    char *query = strchr(target, '?');
+    if(query) {
+      *query++ = 0;
+      snprintf(req.query, sizeof(req.query), "%s", query);
+    }
+    websrv_url_decode(req.path, sizeof(req.path), target);
 
-  size_t content_size = content_length_from_headers(buf);
-  size_t initial_size = used - (size_t)header_end;
-  buf[header_end] = first_body_byte;
-  const char *initial = buf + header_end;
-  if(initial_size > content_size) initial_size = content_size;
+    size_t content_size = content_length_from_headers(buf);
+    size_t body_in_buf = used - (size_t)header_end;
+    size_t initial_size =
+        body_in_buf > content_size ? content_size : body_in_buf;
+    buf[header_end] = first_body_byte;
+    const char *initial = buf + header_end;
 
-  int dispatch_rc = dispatch_request(&req, initial, initial_size, content_size);
-  if(dispatch_rc == 0) {
-    bfpilot_diag_mark_first_http(req.method, req.path);
+    int dispatch_rc = dispatch_request(&req, initial, initial_size, content_size);
+    if(dispatch_rc == 0) {
+      bfpilot_diag_mark_first_http(req.method, req.path);
+    }
+
+    /*
+     * Body bytes that were already in the header buffer beyond Content-Length
+     * (next request on a pipelined/keep-alive socket) must be preserved.
+     * Upload path consumes full Content-Length from the socket; only excess
+     * prefetched bytes remain for the next headers.
+     */
+    size_t consumed_from_buf = (size_t)header_end + initial_size;
+    if(consumed_from_buf < used) {
+      size_t leftover = used - consumed_from_buf;
+      memmove(buf, buf + consumed_from_buf, leftover);
+      used = leftover;
+    } else {
+      used = 0;
+    }
+
+    req_count++;
+    if(!websrv_conn_get_keep_alive() || want_close || dispatch_rc != 0) {
+      break;
+    }
   }
 
 done:
+  websrv_conn_set_keep_alive(0);
   free(buf);
   shutdown(fd, SHUT_RDWR);
   close(fd);
@@ -737,10 +826,11 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
    * On FreeBSD/Orbis the accepted socket inherits this; post-accept
    * setsockopt(SO_RCVBUF) is often silently capped to ~256–512 KB, which is
    * too small to absorb PFS write latency during large uploads (zftpd).
-   * Leave SO_SNDBUF to kernel auto-tune (downloads).
+   * SO_SNDBUF on listen helps downloads inherit a larger send window.
    */
   {
-    int rcvbuf = 4 * 1024 * 1024;
+    int rcvbuf = BFPILOT_LISTEN_RCVBUF;
+    int sndbuf = BFPILOT_CONN_SNDBUF;
     if(setsockopt(srvfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) != 0) {
       bfpilot_log("setsockopt SO_RCVBUF listen port %u failed errno=%d",
                   (unsigned int)port, errno);
@@ -751,6 +841,10 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
         bfpilot_log("listen SO_RCVBUF requested=%d effective=%d port=%u",
                     rcvbuf, got, (unsigned int)port);
       }
+    }
+    if(setsockopt(srvfd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) != 0) {
+      bfpilot_log("setsockopt SO_SNDBUF listen port %u failed errno=%d",
+                  (unsigned int)port, errno);
     }
   }
 
@@ -772,7 +866,7 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
   bfpilot_diag_set_bind_rc(0);
   bfpilot_log("bind port %u rc=0", (unsigned int)port);
 
-  if(listen(srvfd, 16) != 0) {
+  if(listen(srvfd, BFPILOT_LISTEN_BACKLOG) != 0) {
     int err = errno;
     bfpilot_diag_set_last_errno(err);
     bfpilot_diag_set_listen_rc(-err);
@@ -783,7 +877,8 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
     return -err;
   }
   bfpilot_diag_set_listen_rc(0);
-  bfpilot_log("listen port %u rc=0 backlog=16", (unsigned int)port);
+  bfpilot_log("listen port %u rc=0 backlog=%d",
+              (unsigned int)port, BFPILOT_LISTEN_BACKLOG);
 
   pthread_mutex_lock(&g_websrv_lock);
   g_websrv_srvfd = srvfd;
@@ -823,13 +918,15 @@ websrv_listen(unsigned short port, websrv_ready_cb_t ready_cb,
 
     /*
      * zftpd: SO_RCVBUF is set on the *listen* socket (above); post-accept
-     * setsockopt is often silently capped on Orbis. Still request 4 MiB so
-     * firmwares that honor it (ftpsrv-style) get a larger data window.
+     * setsockopt is often silently capped on Orbis. Still request large
+     * windows so firmwares that honor them get better bulk transfer.
      * Never TCP_NODELAY on bulk HTTP — tiny segments thrash PFS writes.
      */
     {
-      int rcvbuf = 4 * 1024 * 1024;
+      int rcvbuf = BFPILOT_LISTEN_RCVBUF;
+      int sndbuf = BFPILOT_CONN_SNDBUF;
       (void)setsockopt(connfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+      (void)setsockopt(connfd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
     }
 
     client_arg_t *client = calloc(1, sizeof(*client));

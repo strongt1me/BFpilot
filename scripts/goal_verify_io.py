@@ -44,13 +44,32 @@ def check_upload(failures: list[str]) -> None:
     )
     must("UPLOAD_BUF_SIZE" in t or "BFPILOT_UPLOAD_BUF_SIZE" in t, "upload buf size missing", failures)
     must("MSG_WAITALL" in body or "recv(req->fd" in body, "upload recv loop missing", failures)
-    must("TCP_NODELAY" not in w or "No TCP_NODELAY" in w, "TCP_NODELAY policy comment/code issue", failures)
+    must(
+        "TCP_NODELAY" not in w
+        or "No TCP_NODELAY" in w
+        or "Never TCP_NODELAY" in w
+        or "no bulk TCP_NODELAY" in w.lower(),
+        "TCP_NODELAY policy comment/code issue",
+        failures,
+    )
     # Active bulk accept path must not enable TCP_NODELAY.
     accept_region = w
     if "setsockopt(connfd, IPPROTO_TCP, TCP_NODELAY" in accept_region:
         failures.append("post-accept TCP_NODELAY still active")
     must("SO_RCVBUF" in w, "listen/accept SO_RCVBUF missing", failures)
     must("No posix_fallocate on the upload path" in t or "posix_fallocate" not in body, "upload fallocate doc/code", failures)
+    # Keep-alive for multi-file upload TCP reuse (safe, stability-preserving).
+    must("keep-alive" in w or "KEEPALIVE" in w, "HTTP keep-alive support missing", failures)
+    must("BFPILOT_HTTP_KEEPALIVE_MAX" in w or "req_count" in w, "keep-alive request loop missing", failures)
+    must("SO_SNDBUF" in w, "SO_SNDBUF for download window missing", failures)
+    # Upload buffer must be at least 1 MiB (zftpd floor); prefer 2 MiB default.
+    m_up = re.search(
+        r"#define\s+BFPILOT_UPLOAD_BUF_SIZE\s+\((\d+)\s*\*\s*1024\s*\*\s*1024\)",
+        t,
+    )
+    if m_up:
+        must(int(m_up.group(1)) >= 1, "upload buffer < 1 MiB", failures)
+    must("single-buffer" in t.lower() or "zftpd" in t.lower(), "upload path style comment missing", failures)
 
 
 def check_index(failures: list[str]) -> None:

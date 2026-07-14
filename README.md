@@ -97,9 +97,10 @@ The top-right toolbar has an **Exit** button that shuts down BFpilot cleanly:
 - USB/ext drives appear in the sidebar only when the mount path exists
 
 ### Networking & Performance
-- Buffered HTTP downloads (read from file, write to socket)
-- Fast web upload path (zftpd/ftpsrv/perf8 style): 1 MiB single-buffer recv→write, no pre-upload `posix_fallocate`
-- `SO_RCVBUF` 4 MiB on the **listen** socket (and requested again post-accept); no `TCP_NODELAY` on bulk accepts
+- Buffered HTTP downloads (read from file, write to socket; **1 MiB** stream buffers)
+- Fast web upload (zftpd/ftpsrv style): **2 MiB** single-buffer recv→write, no multi-GB pre-upload `posix_fallocate`, no bulk `TCP_NODELAY`
+- **HTTP keep-alive** (up to 64 requests per connection) for multi-file uploads
+- `SO_RCVBUF` 4 MiB and `SO_SNDBUF` 2 MiB on the **listen** socket (requested again post-accept)
 - Virtual row recycling in the file list UI for large directories
 - Case-insensitive search without storing a second lowercase copy of every path string
 

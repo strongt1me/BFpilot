@@ -9,7 +9,7 @@
 | USB/ext | Sometimes faster than `/data` (different stack) |
 | Firmware variance | zftpd-reported internal upload band ≈ 20–113 MB/s across FW |
 
-Sources: workspace `notes/03-filesystem-io-performance.md`, ps5upload throughput analysis, zftpd STOR patterns, FreeBSD socket/`sendfile` docs.
+Context: scene measurements (zftpd/ftpsrv STOR patterns, ps5upload-style analysis) and FreeBSD socket behavior on Prospero.
 
 ## What was already good (pre this pass)
 
@@ -44,9 +44,9 @@ Sources: workspace `notes/03-filesystem-io-performance.md`, ps5upload throughput
 
 ## How to measure after deploy
 
-1. Rebuild/inject GemBfpilot  
+1. Rebuild and inject `bfpilot.elf`  
 2. Upload one large file (≥500 MB) to `/data/...` and note JSON `averageMBps`, `recvMs`, `writeMs`  
-3. Upload a folder of many small files — multi-file should improve most with keep-alive  
+3. Upload many small files — multi-file benefits most from keep-alive  
 4. Compare Wi-Fi vs wired (wired expected much faster)
 
 Server log line:

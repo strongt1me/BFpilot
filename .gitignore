@@ -6,9 +6,11 @@ build/
 *.so
 *.elf
 __pycache__/
+*.pyc
 diagnostics/
 output/
 screenshot.png
+logs/
 
 # Local environment / editor noise
 .env
@@ -21,3 +23,5 @@ Thumbs.db
 # Temporary research or extracted payload sources
 .research/
 tmp/
+*.bak
+*.tmp

@@ -1,74 +1,101 @@
 # BFpilot
 
-BFpilot is a PS5 payload that serves a browser-based file manager at `http://<PS5_IP>:5905/`.
-It runs from the PS5 web browser (or any device on the same LAN) — no companion PC app is required after injection.
+BFpilot is a PS5 homebrew payload that serves a browser-based file manager at:
 
-The project builds these payloads:
+```text
+http://<PS5_IP>:5905/
+```
 
-- `bfpilot.elf` — main file manager with integrated archive extraction (inject this first).
-- `bfpilot-launcher-installer.elf` — optional home-screen tile installer (separate for firmware compatibility).
-- `bfpilot-archive-worker.elf` — optional standalone archive-worker build kept for diagnostics; normal use does not require injecting it.
+Use it from the PS5 web browser or any device on the same LAN. No companion PC app is required after the payload is injected.
+
+**Current version:** `v0.4.0` (`bfpilot-v0.4.0`)
+
+**Validated on:** digital PS5 firmware **11.60** (elfldr-style inject on port **9021**).
+
+> Network services are **trusted LAN only**. Do not expose port `5905` to the public internet.
+
+---
+
+## What you get
+
+| Payload | Role |
+|--------|------|
+| **`bfpilot.elf`** | Main file manager + integrated archive extraction. **Inject this first.** |
+| **`bfpilot-launcher-installer.elf`** | Optional home-screen tile installer (title id `BFPL00001`). Separate binary for firmware compatibility. |
+| `bfpilot-archive-worker.elf` | Optional **build-only diagnostic** of the same archive engine. Normal users do **not** need it; extraction is already inside `bfpilot.elf`. |
+
+Prebuilt release assets ship the two ELFs above. Building from source also produces the archive-worker binary.
 
 ---
 
 ## Features
 
-### File Management
-- Dual-panel layout — left panel browses; right **Target** panel is the copy/move/extract destination
-- Sidebar places: Root (`/`), Data (`/data`), Homebrew (`/data/homebrew`), User (`/user`), Mounts (`/mnt`), connected USB/ext volumes, and custom shortcuts
-- Other paths (for example under `/system_data`) are reachable by navigating from Root or via a custom shortcut; they are not all listed as dedicated sidebar places
-- Upload files via drag-and-drop or a file picker (progress, speed, and ETA in the UI)
-- Download files over HTTP (streamed with buffered `read`/`write` — not zero-copy `sendfile` in the current code)
-- Copy and Move with background job tracking, progress bar, speed, and cancel support
-- **Conflict Overwrite & Merge Prompts** — when a copy or move would overwrite an existing file or merge into an existing folder, the UI asks Overwrite / Merge / Skip
-- Rename files and folders
-- Create folders
-- Delete (recursive, with cancel support)
-- Click-to-calculate folder sizes
+### File management
+
+- Dual-panel layout: left browses; right **Target** panel is the copy / move / extract destination
+- Sidebar places: Root (`/`), Data (`/data`), Homebrew (`/data/homebrew`), User (`/user`), Mounts (`/mnt`), connected USB (`/mnt/usb0–7`) and external (`/mnt/ext0–7`) volumes when present, plus custom shortcuts
+- Other paths (for example under `/system_data`) via Root navigation or a custom shortcut
+- **Upload Files** and **Upload Folder** via the system file pickers (progress, speed, ETA). Folder upload needs a browser that supports `webkitdirectory` (PS5 browser may not)
+- **Download** selected files over HTTP (buffered `read` → socket `write`, **1 MiB** stream buffer — not `sendfile`)
+- **Copy** / **Move** with background jobs, progress bar, speed, cancel
+- Free-space preflight before copy/move when sizes are known
+- **Conflict prompts** (Overwrite / Merge / Skip) when destinations collide
+- Rename, create folder, recursive delete (with cancel)
+- Click a folder’s size cell to calculate directory size on demand
 
 ### Selection
-- **Checkbox multi-selection** — every row has a checkbox (PS5 controller friendly)
-- **Select All** master checkbox in the column header
-- Clicking the row body does single-select; clicking the checkbox toggles without deselecting others
 
-### Search & Indexing
-- **Index All** rebuilds an in-memory path index (Everything-style: crawl once, query RAM) using a multi-threaded work-stealing crawler
-- It does **not** walk every kernel mount. Default `all` mode collects **priority + detected** roots, then crawls each with **same-device (XDEV)** fencing:
-  - **first:** `/data` (and useful subtrees like `/data/homebrew`), `/user` (app/meta/download/savedata/…), `/mnt/usb0–7`, `/mnt/ext0–7`
+- Checkbox multi-select (controller-friendly)
+- Select-all master checkbox in the list header
+- Row body click = single select; checkbox toggles without clearing others
+
+### Search & Index All
+
+- **Index All** builds an in-memory path index (Everything-style: crawl once, query RAM)
+- Crawl runs on a **background thread**, sequentially over roots (multi-worker crawl was dropped for stability under common jailbreak loaders)
+- Default `all` mode collects **priority + detected** roots, then crawls each with **same-device (XDEV)** fencing:
+  - **first:** `/data` (and useful subtrees such as `/data/homebrew`), `/user` (app/meta/download/savedata/…), `/mnt/usb0–7`, `/mnt/ext0–7`
   - **then:** `/system`, `/system_data`, `/system_ex`, `/preinst*`, `/hostapp`, other distinct top-level mounts, and `/`
   - **never as full roots:** `/mnt` hub, `/system_tmp`, `/update`, `/mnt/sandbox`, `/mnt/shadowmnt`, `/dev`, `/proc`, `/sys`, `/net`, `/run`
-  - mountpoint directory names may appear in the index, but crawlers **do not cross `st_dev`**
-  - **soft-fail:** one bad root does not throw away the rest; status reports `rootsOk` / `rootsFail`
+  - mountpoint directory names may appear in the index; crawlers **do not cross `st_dev`**
+  - **soft-fail:** one bad root does not discard the rest; status reports `rootsOk` / `rootsFail`
   - hard cap ~**2,000,000** entries (`truncated` if hit)
-- Queries use case-insensitive multi-term `strcasestr` over the in-memory index (usually very fast after rebuild; not a fixed `0ms` guarantee)
-- Results highlight matches; sizes/mtimes come from real `lstat` data
-- Live status includes entry counts, timing, and root success/failure lists; cancel is supported
-- Optional disk cache: `/data/BFpilot/search.idx`
+- Queries: case-insensitive multi-term match (`strcasestr`) over the index (default **200** results, max **1000** per request)
+- Match highlighting in the UI; sizes/mtimes from indexed `lstat` data
+- Live status: entry counts, timing, root success/failure lists; cancel keeps a partial index when possible
+- Optional on-disk cache: `/data/BFpilot/search.idx`
 
-### Archive Extraction
-- **ZIP** — Stored, Deflate, ZIP64, ZipCrypto password, multi-volume `.zip.001` / `.z01` splits
-- **RAR** — RAR4 and RAR5, password-protected, multipart `.partN.rar` volume chains
-- **7z** — LZMA/LZMA2, password-protected, split `.7z.001` sets
-- Password prompt in the browser when the archive is encrypted
-- Extract destination pre-fills from the active Target panel path
-- Extraction progress bar with speed, bytes written, and ETA
-- Partial output cleanup on error or cancel
-- Integrated in `bfpilot.elf` — no second payload injection needed for normal extract
+### Archive extraction (integrated in `bfpilot.elf`)
 
-### Image Viewer
-- Built-in viewer for: `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`, `.ico`, `.svg`
-- Click-and-drag **panning**
-- Mouse-wheel **zooming** (about 0.1× – 10×)
-- 90° **rotation** button
-- **Reset** button to restore original zoom and position
-- Double-click an image to open; `Escape` to close
+| Format | Support |
+|--------|---------|
+| **ZIP** | Stored, Deflate, ZIP64, ZipCrypto passwords. **ZIP AES is refused.** Multipart/split ZIP is **not** advertised as supported. |
+| **RAR** | RAR4 / RAR5, password, multipart `.partN.rar` / `.rNN` chains. Multi-thread RAR extract is limited for stability. |
+| **7z** | LZMA / LZMA2, password, split `.7z.001` sets |
 
-### Text Editor
-- Inline edit for common text-like extensions (for example `.txt`, `.ini`, `.cfg`, `.log`, `.json`, `.xml`, `.js`, `.py`, `.sh`, `.md`, `.conf`, `.html`, `.css`, `.h`, `.c`, `.cpp`)
-- Full-screen overlay editor; saves back to the PS5 filesystem (size limits apply in the UI)
+- Password prompt in the browser when needed
+- Extract destination pre-fills from the **Target** panel path
+- Allowed extract roots: **`/data`**, **`/mnt/usb0–7`**, **`/mnt/ext0–7`**
+- Progress with speed, bytes written, and ETA
+- Partial output cleanup on error (browser cancel after extract starts is **not** available yet)
+- No second payload injection for normal extract
 
-### Log Viewer
-Log button opens a dropdown to pick which log to view:
+### Image viewer
+
+- `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`, `.ico`, `.svg`
+- Click-drag pan, mouse-wheel zoom (~0.1×–10×), 90° rotate, reset
+- Double-click an image row to open; `Escape` to close
+
+### Text editor
+
+- Inline edit for common text-like extensions:  
+  `.txt`, `.ini`, `.cfg`, `.conf`, `.log`, `.json`, `.xml`, `.js`, `.py`, `.sh`, `.bat`, `.html`, `.css`, `.h`, `.c`, `.cpp`, `.yaml`, `.yml`, `.sql`
+- Files must be under **5 MiB**
+- Full-screen overlay; save writes back to the PS5 filesystem
+
+### Log viewer
+
+Toolbar **Logs** button → dropdown:
 
 | Log | Path on PS5 |
 |-----|-------------|
@@ -77,87 +104,83 @@ Log button opens a dropdown to pick which log to view:
 | Search crawler log | `/data/BFpilot/search_crawl.log` |
 | Boot log | `/data/BFpilot/boot.log` |
 | PS5 VSH log | `/system_data/priv/vshlog/vshlog.0.txt` |
-| PS5 Error History | `/system_data/priv/error/history/` (decoded in the UI) |
+| PS5 Error History | `/system_data/priv/error/history/` (decoded in the UI when readable) |
 
-The **PS5 Error History** option lists crash records under Sony’s history folder when readable, and formats fields such as error codes, Title IDs, and timestamps when present.
+Auto-refreshes about every 2 seconds while open.
 
-Logs auto-refresh every 2 seconds while the overlay is open.
+### Exit
 
-### Exit Button
-The top-right toolbar has an **Exit** button that shuts down BFpilot cleanly:
-- Calls `/api/control/shutdown` (token-protected)
-- Unblocks the `accept()` loop and stops background archive/search work where possible
-- Releases BFpilot’s web port **`5905`** so you can re-inject without a console reboot
-- Does **not** stop the separate ELF loader service (typically still listening on **`9021`**)
+Top-right **Exit** calls `/api/control/shutdown` (token-protected):
 
-### Navigation & Shortcuts
-- Click-through path breadcrumbs to jump to any parent folder
-- Persistent **custom shortcuts** — add, rename, and remove bookmarks saved to `/data/BFpilot/shortcuts.txt`
-- Storage summary (usable free / total / reserved) shown for places that report volume stats
-- USB/ext drives appear in the sidebar only when the mount path exists
+- Stops background archive / search work where possible
+- Releases port **5905** so you can re-inject without rebooting the console
+- Does **not** stop the ELF loader (typically still on **9021**)
 
-### Networking & Performance
-- Buffered HTTP downloads (read from file, write to socket; **1 MiB** stream buffers)
-- Fast web upload (zftpd/ftpsrv style): **2 MiB** single-buffer recv→write, no multi-GB pre-upload `posix_fallocate`, no bulk `TCP_NODELAY`
-- **HTTP keep-alive** (up to 64 requests per connection) for multi-file uploads
-- `SO_RCVBUF` 4 MiB and `SO_SNDBUF` 2 MiB on the **listen** socket (requested again post-accept)
-- Virtual row recycling in the file list UI for large directories
-- Case-insensitive search without storing a second lowercase copy of every path string
+### Navigation & shortcuts
 
-### Permission Handling
-BFpilot sets mode `0777` on files and directories it creates (copies, uploads, extracted files, created folders) via `umask(0)` plus `chmod`/`fchmod`. There is no manual chmod UI.
+- Path bar + breadcrumbs (Up / Go / Refresh)
+- Persistent custom shortcuts in `/data/BFpilot/shortcuts.txt` (add / remove / rename)
+- Storage summary (usable free / total / reserved) when volume stats are available
+- USB/ext entries appear only when those mount paths exist
 
-### Diagnostics
-- `/api/status` — version / build information
-- `/api/diag` — runtime diagnostics (bind/listen state, notification probe results, last errno, first HTTP request, and related fields)
-- Fatal signal handler logs to `/data/BFpilot/crash.log` on crashes such as SIGSEGV/SIGBUS
+### Networking & performance (v0.4.0)
+
+- HTTP/1.1 **keep-alive** (up to **64** requests per connection) — helps multi-file upload
+- Upload STOR: **2 MiB** single-buffer `recv` → `write` (no multi-GB `posix_fallocate` while the body streams; no bulk `TCP_NODELAY`)
+- Download stream buffer: **1 MiB**
+- Listen socket: **SO_RCVBUF 4 MiB**, **SO_SNDBUF 2 MiB**, backlog **32** (kernel may cap; values re-applied post-accept)
+- Copy/move uses large sequential buffers
+- Virtual row recycling in the file list for huge directories
+- Search index does not store a second lowercase copy of every path
+
+See [docs/UPLOAD_PERFORMANCE.md](docs/UPLOAD_PERFORMANCE.md).
+
+### Permissions
+
+Created files/dirs (upload, copy, extract, mkdir) get mode **`0777`** via `umask(0)` plus `chmod` / `fchmod`. There is no manual chmod UI.
+
+### Diagnostics (HTTP)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/status` (or `/api/version`) | Version / build tag |
+| `GET /api/diag` | Runtime diagnostics (bind/listen, notify probe, errno, first request, …) |
+| `GET /api/fs/places` | Sidebar places + storage stats |
+| `GET /api/fs/*` | File manager API (list, upload, copy, search, archive, …) |
+
+Fatal signals log to `/data/BFpilot/crash.log` when possible.
 
 ---
 
-## Download
+## Download & install
 
-Get the latest release from the [Releases page](https://github.com/ItsBlurf/BFpilot/releases).
+Latest binaries: **[Releases](https://github.com/ItsBlurf/BFpilot/releases)**
 
-- **`bfpilot.elf`** — inject this first. File manager and integrated archive engine.
-- **`bfpilot-launcher-installer.elf`** — only if you want the PS5 home-screen tile.
-
----
-
-## Usage
-
-Inject the payload to your loader (usually port `9021`):
+1. Jailbreak and keep an ELF loader listening (usually **`9021`** / elfldr).
+2. Inject **`bfpilot.elf`**.
+3. Open `http://<PS5_IP>:5905/`.
+4. Optionally inject **`bfpilot-launcher-installer.elf`** for a home-screen tile that opens `http://127.0.0.1:5905/`.
 
 ```sh
 python3 payload_sender.py <PS5_IP> 9021 bfpilot.elf
+python3 payload_sender.py <PS5_IP> 9021 bfpilot-launcher-installer.elf
 ```
 
-Open the web UI:
+You can also send the ELFs with community loaders such as [ps5-payload-manager](https://github.com/itsPLK/ps5-payload-manager) or [Blurfer](https://github.com/ItsBlurf/Blurfer).
 
-```
-http://<PS5_IP>:5905/
-```
+Health checks:
 
-Health check endpoints:
-
-```
+```text
 http://<PS5_IP>:5905/api/status
 http://<PS5_IP>:5905/api/diag
 http://<PS5_IP>:5905/api/fs/places
 ```
 
-Install or refresh the launcher tile:
-
-```sh
-python3 payload_sender.py <PS5_IP> 9021 bfpilot-launcher-installer.elf
-```
-
-The tile opens `http://127.0.0.1:5905/`.
-
 ---
 
 ## Build
 
-Set `PS5_PAYLOAD_SDK` to your PS5 payload SDK path:
+Requires [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) and a host that can run the Prospero toolchain wrappers (Linux, macOS, or Windows with a Unix-like environment / Git Bash).
 
 ```sh
 export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
@@ -165,39 +188,39 @@ make clean all
 make inspect-imports
 ```
 
+On Windows you can use `build.cmd` if your environment is already set up.
+
 Expected outputs:
 
-```
+```text
 bfpilot.elf
 bfpilot-launcher-installer.elf
 bfpilot-archive-worker.elf
 ```
 
-`make inspect-imports` verifies that `bfpilot.elf` contains no launcher/AppInstUtil imports and that the installer contains the required ones.
+Optional slim build without integrated archives:
+
+```sh
+make bfpilot-lite
+```
+
+`make inspect-imports` checks that `bfpilot.elf` has no AppInstUtil / launcher installer imports, and that the launcher installer contains the expected ones.
+
+Default HTTP port is **5905** (`WEB_PORT` override is for local experiments only).
 
 ---
 
-## Diagnostics & Testing
+## Developer diagnostics & tests
 
-Read-only diagnostics:
+These targets need a reachable PS5 and `PS5_IP` (or hostname). They are for developers; end users only need the ELFs.
 
 ```sh
 PS5_IP=<PS5_IP> BF_WEB_PORT=5905 make ps5-diag
-```
-
-Storage audit (free-space mismatch investigation):
-
-```sh
 PS5_IP=<PS5_IP> BF_WEB_PORT=5905 make ps5-storage-audit
-```
-
-Smoke test (uses only files under `/data/test`):
-
-```sh
 PS5_IP=<PS5_IP> BF_WEB_PORT=5905 BF_ALLOW_PS5_WRITE=1 make ps5-smoke
 ```
 
-Archive performance harness:
+Archive performance harness (writes under BFpilot-owned test paths when enabled):
 
 ```sh
 BF_ALLOW_PS5_WRITE=1 \
@@ -208,33 +231,55 @@ PS5_IP=<PS5_IP> BF_WEB_PORT=5905 \
 make ps5-archive-perf
 ```
 
-Runtime logs on the PS5:
+Structural gates (no hardware): `python3 scripts/goal_verify_io.py`
 
-```
+Runtime paths on the PS5:
+
+```text
 /data/BFpilot/log.txt
 /data/BFpilot/boot.log
 /data/BFpilot/crash.log
 /data/BFpilot/search_crawl.log
+/data/BFpilot/search.idx
+/data/BFpilot/shortcuts.txt
 /data/BFpilot/archive-integrated/archive-worker.log
 /data/BFpilot/archive-integrated/status.json
+/data/BFpilot/launcher-installer.log   # after running the tile installer
 ```
 
 ---
 
 ## Compatibility
 
-`bfpilot.elf` is launcher-free by design. It avoids AppInstUtil and related installer imports that can fail before `main()` on some firmware and loader combinations. Archive extraction is integrated via libc-safe archive code only.
+`bfpilot.elf` is **launcher-free**: no AppInstUtil / UserService / SystemService / `kernel_sys` installer imports that can fail before `main()` on some firmware and loader combinations. Archive extraction uses libc-safe integrated engines only.
 
-`bfpilot-launcher-installer.elf` is separate and uses the full installer dependency set (including UserService / AppInstUtil). If it fails on a firmware, the file manager remains usable.
+`bfpilot-launcher-installer.elf` is separate and uses the full installer dependency set. If the tile install fails on a firmware, the file manager still works.
 
-See [docs/COMPATIBILITY_STRATEGY.md](docs/COMPATIBILITY_STRATEGY.md) and [docs/FIRMWARE_TESTING.md](docs/FIRMWARE_TESTING.md) for details.
+Details: [docs/COMPATIBILITY_STRATEGY.md](docs/COMPATIBILITY_STRATEGY.md).
 
 ---
 
-## Credits & Third-Party
+## Documentation
 
-- **[owendswang/ps5-web-file-manager](https://github.com/owendswang/ps5-web-file-manager)** — Image viewer and checkbox multi-selection UI were inspired by owendswang’s work.
-- **[ps5-payload-dev](https://github.com/ps5-payload-dev)** — PS5 payload SDK, websrv, and related tooling.
-- **[UnRAR source](https://www.rarlab.com/rar_add.htm)** — RAR extraction via the freeware UnRAR library (© Alexander Roshal).
-- **[miniz](https://github.com/richgel999/miniz)** — ZIP decompression (public domain / Unlicense).
-- **[LZMA SDK](https://www.7-zip.org/sdk.html)** — 7z decompression (public domain, Igor Pavlov).
+| Doc | Contents |
+|-----|----------|
+| [docs/COMPATIBILITY_STRATEGY.md](docs/COMPATIBILITY_STRATEGY.md) | Payload split, imports, tile installer |
+| [docs/UPLOAD_PERFORMANCE.md](docs/UPLOAD_PERFORMANCE.md) | Upload/download tuning and what we deliberately avoid |
+| [docs/ARCHIVE_EXTRACTION.md](docs/ARCHIVE_EXTRACTION.md) | Formats, limits, allowed extract roots |
+| [CHANGELOG.md](CHANGELOG.md) | Version history |
+
+---
+
+## Credits & third-party
+
+- **[owendswang/ps5-web-file-manager](https://github.com/owendswang/ps5-web-file-manager)** — image viewer and checkbox multi-select UI inspiration
+- **[ps5-payload-dev](https://github.com/ps5-payload-dev)** — PS5 payload SDK, websrv, and related tooling
+- **[UnRAR](https://www.rarlab.com/rar_add.htm)** — RAR extraction (freeware UnRAR library, © Alexander Roshal)
+- **[miniz](https://github.com/richgel999/miniz)** — ZIP inflate (public domain / Unlicense)
+- **[LZMA SDK](https://www.7-zip.org/sdk.html)** — 7z decompression (public domain, Igor Pavlov)
+
+---
+
+## License note
+
+Third-party trees under `third_party/` keep their own licenses (see UnRAR `license.txt` and upstream notices). Project-specific source is provided for homebrew use with the PS5 payload ecosystem.

@@ -35,7 +35,7 @@ Releases only ship the first two.
 - Checkboxes + select all (works fine with a controller)
 
 **Search**
-- **Index All** crawls useful mounts into RAM (Everything-style queries after that)
+- **Index All** crawls some useful mounts into RAM (Everything-style queries after that)
 - Priority roots first (`/data`, `/user`, USB/ext), then system paths; stays on the same filesystem (`st_dev`) so it doesn't walk sandbox/nullfs nonsense
 - Bad roots are skipped instead of killing the whole index
 - Cap about 2 million entries; cache at `/data/BFpilot/search.idx`
